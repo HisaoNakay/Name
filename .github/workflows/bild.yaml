@@ -14,12 +14,18 @@ jobs:
         run: |
           mkdir -p iso-build
           cat > iso-build/extra-packages.x86_64 << 'EOF'
-          mate
+          mate-desktop
+          mate-panel
+          mate-session-manager
+          mate-settings-daemon
+          mate-control-center
+          mate-terminal
+          marco
+          caja
           nemo
           fish
           featherpad
           kwrite
-          falcon
           strawberry
           parcellite
           zathura
