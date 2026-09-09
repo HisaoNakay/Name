@@ -6,21 +6,14 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: archlinux:latest
     steps:
-      - name: Update system and install archiso
-        run: |
-          pacman -Sy --noconfirm archlinux-keyring
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm archiso git
+      - name: Checkout (so we have a workspace)
+        uses: actions/checkout@v4
 
-      - name: Clone releng profile as base
-        run: git clone https://gitlab.archlinux.org/archlinux/archiso.git
-
-      - name: Add custom packages to profile
+      - name: Prepare custom packages list
         run: |
-          cat >> archiso/configs/releng/packages.x86_64 << 'EOF'
+          mkdir -p iso-build
+          cat > iso-build/extra-packages.x86_64 << 'EOF'
           mate
           nemo
           fish
@@ -40,11 +33,22 @@ jobs:
           pacman-contrib
           EOF
 
-      - name: Build ISO
-        run: mkarchiso -v -o /output archiso/configs/releng
+      - name: Build ISO inside privileged Arch container
+        run: |
+          docker run --rm --privileged \
+            -v "${{ github.workspace }}:/workspace" \
+            archlinux:latest \
+            bash -c "
+              pacman -Sy --noconfirm archlinux-keyring &&
+              pacman -Syu --noconfirm &&
+              pacman -S --noconfirm archiso git &&
+              git clone https://gitlab.archlinux.org/archlinux/archiso.git /tmp/archiso &&
+              cat /workspace/iso-build/extra-packages.x86_64 >> /tmp/archiso/configs/releng/packages.x86_64 &&
+              mkarchiso -v -o /workspace/output /tmp/archiso/configs/releng
+            "
 
       - name: Upload built ISO as artifact
         uses: actions/upload-artifact@v4
         with:
           name: hisaonakay-arch-iso
-          path: /output/*.iso
+          path: output/*.iso
