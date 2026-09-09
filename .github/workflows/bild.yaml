@@ -1,0 +1,50 @@
+name: Build Custom Arch ISO
+
+on:
+  workflow_dispatch:  # запуск вручную по кнопке в разделе Actions
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Update system and install archiso
+        run: |
+          pacman -Sy --noconfirm archlinux-keyring
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm archiso git
+
+      - name: Clone releng profile as base
+        run: git clone https://gitlab.archlinux.org/archlinux/archiso.git
+
+      - name: Add custom packages to profile
+        run: |
+          cat >> archiso/configs/releng/packages.x86_64 << 'EOF'
+          mate
+          nemo
+          fish
+          featherpad
+          kwrite
+          falcon
+          strawberry
+          parcellite
+          zathura
+          zathura-pdf-mupdf
+          rofi
+          rofimoji
+          xarchiver
+          kdeconnect
+          networkmanager
+          nano
+          pacman-contrib
+          EOF
+
+      - name: Build ISO
+        run: mkarchiso -v -o /output archiso/configs/releng
+
+      - name: Upload built ISO as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hisaonakay-arch-iso
+          path: /output/*.iso
