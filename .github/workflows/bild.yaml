@@ -50,13 +50,13 @@ jobs:
               pacman -S --noconfirm archiso git &&
               git clone https://gitlab.archlinux.org/archlinux/archiso.git /tmp/archiso &&
               cat /workspace/iso-build/extra-packages.x86_64 >> /tmp/archiso/configs/releng/packages.x86_64 &&
-              mkdir -p /tmp/archiso/configs/releng/airootfs/var/cache/pacman/pkg &&
-              pacman -Syw --cachedir=/tmp/archiso/configs/releng/airootfs/var/cache/pacman/pkg --noconfirm \$(cat /tmp/archiso/configs/releng/packages.x86_64) &&
+              mkdir -p /tmp/archiso/configs/releng/airootfs/offline-cache &&
+              pacman -Syw --cachedir=/tmp/archiso/configs/releng/airootfs/offline-cache --noconfirm \$(cat /tmp/archiso/configs/releng/packages.x86_64) &&
               mkarchiso -v -o /workspace/output /tmp/archiso/configs/releng
             "
 
       - name: Upload built ISO as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: hisaonakay-arch-iso
+          name: custom-arch-iso
           path: output/*.iso
