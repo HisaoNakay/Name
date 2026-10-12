@@ -1,0 +1,21 @@
+name: Test 1 - Check bdver2 support
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-bdver2:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check GCC version on runner (baseline)
+        run: gcc --version
+
+      - name: Test bdver2 with runner's own GCC
+        run: |
+          echo 'int main() { return 0; }' > test.c
+          gcc -march=bdver2 -O2 -pipe -c test.c -o test.o
+          echo "✅ Runner's GCC accepts -march=bdver2"
+
+      - name: Show which GCC versions support bdver2
+        run: |
+          gcc -march=bdver2 -Q --help=target 2>&1 | grep -A2 "march"
