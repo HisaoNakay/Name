@@ -12,6 +12,12 @@ jobs:
       - name: Checkout repo (for make.conf)
         uses: actions/checkout@v4
 
+      - name: Runner CPU info
+        run: |
+          lscpu | grep -E 'Model name|Vendor ID'
+          echo "--- AMD-only extensions present on runner? (empty = none) ---"
+          grep -o -w -E 'fma4|xop|tbm' /proc/cpuinfo | sort -u || true
+
       - name: Find latest stage3 (amd64-systemd)
         id: find
         run: |
@@ -36,7 +42,7 @@ jobs:
           sudo mount --rbind /dev /mnt/gentoo/dev
           sudo mount --make-rslave /mnt/gentoo/dev
 
-      - name: Install make.conf, sync Portage, install gentoo-sources
+      - name: Install make.conf (bdver2), sync Portage, install gentoo-sources
         run: |
           sudo cp make.conf /mnt/gentoo/etc/portage/make.conf
           sudo chroot /mnt/gentoo /bin/bash -c "
@@ -45,6 +51,24 @@ jobs:
             emerge --quiet-build gentoo-sources
             eselect kernel set 1
             ls -l /usr/src/
+          "
+
+      - name: DIAGNOSE - does bc built with bdver2 run on the runner?
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c '
+            echo "100*3" | bc
+            echo "bc exit code: $?  (132 = Illegal instruction)"
+          ' || true
+
+      - name: FIX - rebuild build-time tools with portable flags
+        run: |
+          sudo sed -i 's/^COMMON_FLAGS=.*/COMMON_FLAGS="-O2 -pipe"/' /mnt/gentoo/etc/portage/make.conf
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            grep '^COMMON_FLAGS' /etc/portage/make.conf
+            emerge --oneshot --quiet-build sys-devel/bc app-arch/cpio sys-libs/binutils-libs
+            echo '100*3' | bc
+            echo 'bc works after rebuild'
           "
 
       - name: Look for CPU-specific options in this kernel's Kconfig
