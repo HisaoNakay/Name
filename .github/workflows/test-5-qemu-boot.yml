@@ -1,0 +1,72 @@
+name: Test 5 - Boot kernel in QEMU
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID of the successful Test 4 run (number after /actions/runs/ in its URL)'
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  qemu-boot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Download kernel artifact from Test 4
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-hp-defconfig
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: kernel
+
+      - name: Show downloaded files
+        run: ls -lh kernel
+
+      - name: Install QEMU and busybox
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 busybox-static cpio
+
+      - name: Build tiny initramfs
+        run: |
+          mkdir -p initramfs/bin initramfs/proc initramfs/sys initramfs/dev
+          cp "$(which busybox)" initramfs/bin/busybox
+          for a in sh mount echo cat uname poweroff sleep grep; do
+            ln -s busybox initramfs/bin/$a
+          done
+          sudo mknod -m 600 initramfs/dev/console c 5 1
+          cat > initramfs/init << 'INITEOF'
+          #!/bin/sh
+          mount -t proc proc /proc
+          mount -t sysfs sys /sys
+          echo "=== KERNEL BOOT OK ==="
+          uname -a
+          grep -m1 'model name' /proc/cpuinfo
+          echo "=== powering off ==="
+          poweroff -f
+          INITEOF
+          chmod +x initramfs/init
+          (cd initramfs && find . | sudo cpio -o -H newc -R 0:0 2>/dev/null | gzip -9 > ../initramfs.gz)
+          ls -lh initramfs.gz
+
+      - name: Boot in QEMU
+        run: |
+          timeout 300 qemu-system-x86_64 \
+            -kernel kernel/bzImage \
+            -initrd initramfs.gz \
+            -append "console=ttyS0 panic=5" \
+            -m 1024 -smp 2 \
+            -nographic -no-reboot 2>&1 | tee boot.log || true
+          echo "-----"
+          if grep -q "KERNEL BOOT OK" boot.log; then
+            echo "✅ Kernel booted and ran init"
+          else
+            echo "❌ No boot marker found - see log above"
+            exit 1
+          fi
