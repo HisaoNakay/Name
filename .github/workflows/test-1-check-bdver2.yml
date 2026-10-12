@@ -1,21 +1,59 @@
-name: Test 1 - Check bdver2 support
+name: Test 2 - Stage3 + chroot + bdver2
 
 on:
   workflow_dispatch:
 
 jobs:
-  check-bdver2:
+  stage3-chroot:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - name: Check GCC version on runner (baseline)
-        run: gcc --version
-
-      - name: Test bdver2 with runner's own GCC
+      - name: Runner resources (for reference)
         run: |
-          echo 'int main() { return 0; }' > test.c
-          gcc -march=bdver2 -O2 -pipe -c test.c -o test.o
-          echo "✅ Runner's GCC accepts -march=bdver2"
+          nproc
+          free -h
+          df -h /
 
-      - name: Show which GCC versions support bdver2
+      - name: Find latest stage3 (amd64-systemd)
+        id: find
         run: |
-          gcc -march=bdver2 -Q --help=target 2>&1 | grep -A2 "march"
+          BASE=https://distfiles.gentoo.org/releases/amd64/autobuilds
+          # Файл подписан PGP, поэтому берём только строку с .tar.xz
+          PATH_LINE=$(curl -fsSL "$BASE/latest-stage3-amd64-systemd.txt" | grep -E '\.tar\.xz' | head -1 | cut -d' ' -f1)
+          echo "Found: $PATH_LINE"
+          test -n "$PATH_LINE"
+          echo "url=$BASE/$PATH_LINE" >> "$GITHUB_OUTPUT"
+
+      - name: Download stage3
+        run: |
+          curl -fL --retry 3 -o stage3.tar.xz "${{ steps.find.outputs.url }}"
+          ls -lh stage3.tar.xz
+
+      - name: Extract stage3
+        run: |
+          sudo mkdir -p /mnt/gentoo
+          sudo tar xpf stage3.tar.xz -C /mnt/gentoo --xattrs-include='*.*' --numeric-owner
+          ls /mnt/gentoo
+
+      - name: Prepare chroot mounts
+        run: |
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+
+      - name: Enter chroot - sanity check
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "cat /etc/os-release | head -3 && gcc --version | head -1"
+
+      - name: Test bdver2 with Gentoo's own GCC
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            echo 'int main() { return 0; }' > /tmp/test.c
+            gcc -march=bdver2 -O2 -pipe -c /tmp/test.c -o /tmp/test.o
+            echo '✅ Gentoo GCC accepts -march=bdver2'
+            gcc -march=bdver2 -Q --help=target | grep -E '^  -m(avx|aes|fma|fma4|xop|f16c|bmi|sse4a) '
+          "
