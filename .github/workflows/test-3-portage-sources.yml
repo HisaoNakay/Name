@@ -1,0 +1,74 @@
+name: Test 3 - make.conf + portage sync + gentoo-sources
+
+on:
+  workflow_dispatch:
+
+jobs:
+  portage-sources:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo (for make.conf)
+        uses: actions/checkout@v4
+
+      - name: Find latest stage3 (amd64-systemd)
+        id: find
+        run: |
+          BASE=https://distfiles.gentoo.org/releases/amd64/autobuilds
+          PATH_LINE=$(curl -fsSL "$BASE/latest-stage3-amd64-systemd.txt" | grep -E '\.tar\.xz' | head -1 | cut -d' ' -f1)
+          echo "Found: $PATH_LINE"
+          test -n "$PATH_LINE"
+          echo "url=$BASE/$PATH_LINE" >> "$GITHUB_OUTPUT"
+
+      - name: Download and extract stage3
+        run: |
+          curl -fL --retry 3 -o stage3.tar.xz "${{ steps.find.outputs.url }}"
+          sudo mkdir -p /mnt/gentoo
+          sudo tar xpf stage3.tar.xz -C /mnt/gentoo --xattrs-include='*.*' --numeric-owner
+
+      - name: Prepare chroot mounts
+        run: |
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+
+      - name: Install our make.conf
+        run: |
+          sudo cp make.conf /mnt/gentoo/etc/portage/make.conf
+          cat /mnt/gentoo/etc/portage/make.conf
+
+      - name: Sync Portage tree (emerge-webrsync)
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "emerge-webrsync"
+
+      - name: Show profile and effective settings
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            eselect profile show
+            emerge --info | grep -E '^(CFLAGS|CXXFLAGS|MAKEOPTS|CPU_FLAGS_X86|USE|ACCEPT_LICENSE|CHOST)='
+          "
+
+      - name: Install gentoo-sources
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            emerge --quiet-build gentoo-sources
+            eselect kernel list
+            eselect kernel set 1
+            ls -l /usr/src/
+            du -sh /usr/src/linux/
+            head -5 /usr/src/linux/Makefile
+          "
+
+      - name: Check kernel build tools in stage3
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            for t in make gcc ld bc flex bison perl pahole openssl cpio; do
+              if command -v \$t >/dev/null; then echo \"✅ \$t\"; else echo \"❌ \$t MISSING\"; fi
+            done
+            ls /usr/include/openssl >/dev/null 2>&1 && echo '✅ openssl headers' || echo '❌ openssl headers MISSING'
+            ls /usr/include/libelf.h >/dev/null 2>&1 && echo '✅ libelf headers' || echo '❌ libelf headers MISSING'
+          "
