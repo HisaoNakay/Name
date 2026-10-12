@@ -1,12 +1,12 @@
-name: Test 3 - make.conf + portage sync + gentoo-sources
+name: Test 4 - Kernel build (defconfig)
 
 on:
   workflow_dispatch:
 
 jobs:
-  portage-sources:
+  kernel-build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     steps:
       - name: Checkout repo (for make.conf)
@@ -36,39 +36,58 @@ jobs:
           sudo mount --rbind /dev /mnt/gentoo/dev
           sudo mount --make-rslave /mnt/gentoo/dev
 
-      - name: Install our make.conf
+      - name: Install make.conf, sync Portage, install gentoo-sources
         run: |
           sudo cp make.conf /mnt/gentoo/etc/portage/make.conf
-          cat /mnt/gentoo/etc/portage/make.conf
-
-      - name: Sync Portage tree (emerge-webrsync)
-        run: |
-          sudo chroot /mnt/gentoo /bin/bash -c "emerge-webrsync"
-
-      - name: Show profile and effective settings
-        run: |
           sudo chroot /mnt/gentoo /bin/bash -c "
-            eselect profile show
-            emerge --info | grep -E '^(CFLAGS|CXXFLAGS|MAKEOPTS|CPU_FLAGS_X86|USE|ACCEPT_LICENSE|CHOST)='
-          "
-
-      - name: Install gentoo-sources
-        run: |
-          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            emerge-webrsync
             emerge --quiet-build gentoo-sources
-            eselect kernel list
             eselect kernel set 1
             ls -l /usr/src/
-            du -sh /usr/src/linux/
-            head -5 /usr/src/linux/Makefile
           "
 
-      - name: Check kernel build tools in stage3
+      - name: Look for CPU-specific options in this kernel's Kconfig
         run: |
           sudo chroot /mnt/gentoo /bin/bash -c "
-            for t in make gcc ld bc flex bison perl pahole openssl cpio; do
-              if command -v \$t >/dev/null; then echo \"✅ \$t\"; else echo \"❌ \$t MISSING\"; fi
-            done
-            ls /usr/include/openssl >/dev/null 2>&1 && echo '✅ openssl headers' || echo '❌ openssl headers MISSING'
-            ls /usr/include/libelf.h >/dev/null 2>&1 && echo '✅ libelf headers' || echo '❌ libelf headers MISSING'
+            cd /usr/src/linux
+            echo '--- Piledriver / Bulldozer / K10 options in Kconfig.cpu ---'
+            grep -nE 'PILEDRIVER|BULLDOZER|MK10|STEAMROLLER' arch/x86/Kconfig.cpu || echo '(none found)'
           "
+
+      - name: Configure kernel (defconfig, BTF off)
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            cd /usr/src/linux
+            make defconfig
+            scripts/config -d DEBUG_INFO_BTF
+            make olddefconfig
+            echo '--- CPU-related options in resulting .config ---'
+            grep -E '^CONFIG_(GENERIC_CPU|MK8|MK10|M[A-Z0-9]+|X86_64_VERSION|X86_NATIVE_CPU)=' .config || true
+            grep -E 'DEBUG_INFO_BTF' .config || true
+          "
+
+      - name: Build kernel (timed)
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            cd /usr/src/linux
+            time make -j4
+            ls -lh arch/x86/boot/bzImage
+          "
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          sudo cp /mnt/gentoo/usr/src/linux/arch/x86/boot/bzImage out/
+          sudo cp /mnt/gentoo/usr/src/linux/.config out/config-defconfig
+          sudo cp /mnt/gentoo/usr/src/linux/System.map out/
+          sudo chown -R runner:runner out
+          ls -lh out
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-hp-defconfig
+          path: out/
