@@ -1,0 +1,99 @@
+name: Test 6 - HP kernel (defconfig + hp-kernel.config)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hp-kernel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repo (make.conf + hp-kernel.config)
+        uses: actions/checkout@v4
+
+      - name: Find latest stage3 (amd64-systemd)
+        id: find
+        run: |
+          BASE=https://distfiles.gentoo.org/releases/amd64/autobuilds
+          PATH_LINE=$(curl -fsSL "$BASE/latest-stage3-amd64-systemd.txt" | grep -E '\.tar\.xz' | head -1 | cut -d' ' -f1)
+          test -n "$PATH_LINE"
+          echo "url=$BASE/$PATH_LINE" >> "$GITHUB_OUTPUT"
+
+      - name: Download and extract stage3
+        run: |
+          curl -fL --retry 3 -o stage3.tar.xz "${{ steps.find.outputs.url }}"
+          sudo mkdir -p /mnt/gentoo
+          sudo tar xpf stage3.tar.xz -C /mnt/gentoo --xattrs-include='*.*' --numeric-owner
+
+      - name: Prepare chroot mounts
+        run: |
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+
+      - name: make.conf (portable flags for build-time tools), Portage, gentoo-sources
+        run: |
+          sudo cp make.conf /mnt/gentoo/etc/portage/make.conf
+          sudo sed -i 's/^COMMON_FLAGS=.*/COMMON_FLAGS="-O2 -pipe"/' /mnt/gentoo/etc/portage/make.conf
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            emerge-webrsync
+            emerge --quiet-build gentoo-sources
+            eselect kernel set 1
+          "
+
+      - name: Write verify script
+        run: |
+          cat > verify.sh << 'VEOF'
+          #!/bin/bash
+          cd /usr/src/linux
+          bad=0
+          while IFS== read -r k v; do
+            case "$k" in CONFIG_*) ;; *) continue ;; esac
+            if ! grep -qx "$k=$v" .config; then echo "NOT APPLIED: $k=$v"; bad=1; fi
+          done < /tmp/hp-kernel.config
+          [ $bad = 0 ] && echo "all fragment options applied"
+          exit 0
+          VEOF
+          sudo cp verify.sh /mnt/gentoo/tmp/verify.sh
+          sudo cp hp-kernel.config /mnt/gentoo/tmp/hp-kernel.config
+
+      - name: Configure kernel (defconfig + HP fragment) and verify
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            cd /usr/src/linux
+            make defconfig
+            scripts/kconfig/merge_config.sh -m .config /tmp/hp-kernel.config
+            scripts/config -d DEBUG_INFO_BTF
+            make olddefconfig
+            echo '=== VERIFY: options from fragment that did NOT end up in .config ==='
+            bash /tmp/verify.sh
+          "
+
+      - name: Build kernel (timed)
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            cd /usr/src/linux
+            time make -j4
+            ls -lh arch/x86/boot/bzImage
+          "
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          sudo cp /mnt/gentoo/usr/src/linux/arch/x86/boot/bzImage out/
+          sudo cp /mnt/gentoo/usr/src/linux/.config out/config-hp
+          sudo cp /mnt/gentoo/usr/src/linux/System.map out/
+          sudo chown -R runner:runner out
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-hp-custom
+          path: out/
