@@ -1,0 +1,144 @@
+name: Test 7 - Disk image (GPT + ESP + ext4 + GRUB) booted in QEMU/UEFI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID of the successful Test 6 run (number after /actions/runs/ in its URL)'
+        required: true
+      artifact_name:
+        description: 'Kernel artifact name'
+        required: true
+        default: 'kernel-hp-custom'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  uefi-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repo (make.conf)
+        uses: actions/checkout@v4
+
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: kernel
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf parted dosfstools e2fsprogs
+
+      - name: Create disk image (GPT, ESP 512MiB FAT32, root ext4)
+        run: |
+          truncate -s 8G disk.img
+          LOOP=$(sudo losetup -fP --show disk.img)
+          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo parted -s "$LOOP" mklabel gpt \
+            mkpart ESP fat32 1MiB 513MiB set 1 esp on \
+            mkpart root ext4 513MiB 100%
+          sudo partprobe "$LOOP" || true
+          sudo udevadm settle || true
+          ls -l ${LOOP}*
+          sudo mkfs.vfat -F32 "${LOOP}p1"
+          sudo mkfs.ext4 -F -L gentoo-root "${LOOP}p2"
+          sudo mkdir -p /mnt/gentoo
+          sudo mount "${LOOP}p2" /mnt/gentoo
+          sudo mkdir -p /mnt/gentoo/efi
+          sudo mount "${LOOP}p1" /mnt/gentoo/efi
+          lsblk -f "$LOOP"
+
+      - name: Find latest stage3 (amd64-systemd)
+        id: find
+        run: |
+          BASE=https://distfiles.gentoo.org/releases/amd64/autobuilds
+          PATH_LINE=$(curl -fsSL "$BASE/latest-stage3-amd64-systemd.txt" | grep -E '\.tar\.xz' | head -1 | cut -d' ' -f1)
+          test -n "$PATH_LINE"
+          echo "url=$BASE/$PATH_LINE" >> "$GITHUB_OUTPUT"
+
+      - name: Extract stage3 onto the image
+        run: |
+          curl -fL --retry 3 -o stage3.tar.xz "${{ steps.find.outputs.url }}"
+          sudo tar xpf stage3.tar.xz -C /mnt/gentoo --xattrs-include='*.*' --numeric-owner
+          df -h /mnt/gentoo
+
+      - name: Prepare chroot mounts
+        run: |
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+
+      - name: make.conf (portable flags), Portage sync, emerge GRUB
+        run: |
+          sudo cp make.conf /mnt/gentoo/etc/portage/make.conf
+          sudo sed -i 's/^COMMON_FLAGS=.*/COMMON_FLAGS="-O2 -pipe"/' /mnt/gentoo/etc/portage/make.conf
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            emerge-webrsync
+            emerge --quiet-build sys-boot/grub
+            grub-install --version
+          "
+
+      - name: Install kernel, fstab, first-boot settings
+        run: |
+          ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP}p2")
+          ESP_UUID=$(sudo blkid -s UUID -o value "${LOOP}p1")
+          echo "ROOT_UUID=$ROOT_UUID" >> "$GITHUB_ENV"
+          sudo cp kernel/bzImage /mnt/gentoo/boot/vmlinuz
+          printf 'UUID=%s / ext4 defaults 0 1\nUUID=%s /efi vfat umask=0077 0 2\n' "$ROOT_UUID" "$ESP_UUID" | sudo tee /mnt/gentoo/etc/fstab
+          sudo systemd-firstboot --root=/mnt/gentoo --force --locale=C.UTF-8 --timezone=UTC --hostname=gentoo-hp --root-password=gentoo
+          sudo systemd-machine-id-setup --root=/mnt/gentoo || true
+
+      - name: Install GRUB (UEFI, removable path) and write grub.cfg
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            grub-install --target=x86_64-efi --efi-directory=/efi --boot-directory=/boot --removable --no-nvram
+          "
+          sudo tee /mnt/gentoo/boot/grub/grub.cfg > /dev/null << GRUBEOF
+          set timeout=1
+          menuentry "Gentoo (HP custom kernel)" {
+            search --no-floppy --fs-uuid --set=root $ROOT_UUID
+            linux /boot/vmlinuz root=UUID=$ROOT_UUID ro console=tty0 console=ttyS0,115200
+          }
+          GRUBEOF
+          echo "--- ESP contents ---"
+          sudo find /mnt/gentoo/efi -type f
+          echo "--- grub.cfg ---"
+          cat /mnt/gentoo/boot/grub/grub.cfg
+
+      - name: Unmount and detach image
+        run: |
+          sync
+          sudo umount -R /mnt/gentoo || sudo umount -l -R /mnt/gentoo
+          sudo losetup -d "$LOOP"
+
+      - name: Boot image in QEMU (UEFI, AHCI disk)
+        run: |
+          OVMF=$(ls /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)
+          echo "Using firmware: $OVMF"
+          timeout 300 qemu-system-x86_64 \
+            -bios "$OVMF" \
+            -m 2048 -smp 2 \
+            -device ich9-ahci,id=ahci \
+            -drive file=disk.img,format=raw,if=none,id=d0 \
+            -device ide-hd,drive=d0,bus=ahci.0 \
+            -nographic -no-reboot 2>&1 | tee boot.log || true
+          echo "-----"
+          if grep -q "login:" boot.log; then
+            echo "✅ Booted via UEFI + GRUB to a login prompt"
+          else
+            echo "❌ No login prompt - see log above"
+            exit 1
+          fi
