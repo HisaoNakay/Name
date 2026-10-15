@@ -100,8 +100,9 @@ jobs:
           sudo systemd-firstboot --root=/mnt/gentoo --force --locale=C.UTF-8 --timezone=UTC --hostname=gentoo-hp --root-password=gentoo
           sudo systemd-machine-id-setup --root=/mnt/gentoo || true
 
-      - name: Install GRUB (UEFI, removable path) and write grub.cfg
+           - name: Install GRUB (UEFI, removable path) and write grub.cfg
         run: |
+          ROOT_PARTUUID=$(sudo blkid -s PARTUUID -o value "${LOOP}p2")
           sudo chroot /mnt/gentoo /bin/bash -c "
             set -e
             grub-install --target=x86_64-efi --efi-directory=/efi --boot-directory=/boot --removable --no-nvram
@@ -110,7 +111,7 @@ jobs:
           set timeout=1
           menuentry "Gentoo (HP custom kernel)" {
             search --no-floppy --fs-uuid --set=root $ROOT_UUID
-            linux /boot/vmlinuz root=UUID=$ROOT_UUID ro console=tty0 console=ttyS0,115200
+            linux /boot/vmlinuz root=PARTUUID=$ROOT_PARTUUID ro console=tty0 console=ttyS0,115200
           }
           GRUBEOF
           echo "--- ESP contents ---"
@@ -124,17 +125,36 @@ jobs:
           sudo umount -R /mnt/gentoo || sudo umount -l -R /mnt/gentoo
           sudo losetup -d "$LOOP"
 
-      - name: Boot image in QEMU (UEFI, AHCI disk)
+          - name: Boot image in QEMU (UEFI, AHCI disk)
         run: |
-          OVMF=$(ls /usr/share/ovmf/OVMF.fd /usr/share/OVMF/OVMF_CODE_4M.fd /usr/share/OVMF/OVMF_CODE.fd 2>/dev/null | head -1)
-          echo "Using firmware: $OVMF"
-          timeout 300 qemu-system-x86_64 \
-            -bios "$OVMF" \
+          CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+          VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
+          [ -f "$CODE" ] && [ -f "$VARS_SRC" ] || { echo "OVMF 4M files missing"; ls -l /usr/share/OVMF; exit 1; }
+          cp "$VARS_SRC" /tmp/OVMF_VARS.fd
+
+          : > boot.log
+          qemu-system-x86_64 \
+            -machine q35 \
+            -drive if=pflash,format=raw,readonly=on,file="$CODE" \
+            -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
             -m 2048 -smp 2 \
             -device ich9-ahci,id=ahci \
             -drive file=disk.img,format=raw,if=none,id=d0 \
             -device ide-hd,drive=d0,bus=ahci.0 \
-            -nographic -no-reboot 2>&1 | tee boot.log || true
+            -display none -serial file:boot.log -monitor none -no-reboot &
+          QPID=$!
+
+          # ждём login: до 5 минут, выходим сразу как появится
+          for i in $(seq 1 300); do
+            grep -q "login:" boot.log && break
+            kill -0 "$QPID" 2>/dev/null || break
+            sleep 1
+          done
+          kill "$QPID" 2>/dev/null || true
+          wait "$QPID" 2>/dev/null || true
+
+          echo "----- boot.log -----"
+          cat boot.log
           echo "-----"
           if grep -q "login:" boot.log; then
             echo "✅ Booted via UEFI + GRUB to a login prompt"
