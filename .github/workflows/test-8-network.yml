@@ -178,9 +178,11 @@ jobs:
           printf '[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\n\n[DHCPv4]\nRouteMetric=100\n' | sudo tee /mnt/gentoo/etc/systemd/network/20-wired.network > /dev/null
           printf '[Match]\nName=wl*\n\n[Network]\nDHCP=yes\nIgnoreCarrierLoss=3s\n\n[DHCPv4]\nRouteMetric=600\n' | sudo tee /mnt/gentoo/etc/systemd/network/25-wireless.network > /dev/null
           printf '[General]\nEnableNetworkConfiguration=false\n\n[Network]\nNameResolvingService=systemd\n' | sudo tee /mnt/gentoo/etc/iwd/main.conf > /dev/null
-          sudo systemctl --root=/mnt/gentoo enable systemd-networkd.service systemd-resolved.service iwd.service
+          # enable with Gentoo's own systemctl inside the chroot: the Ubuntu one sees the OpenRC
+          # script /etc/init.d/iwd and tries Debian's update-rc.d, which does not exist in Gentoo
+          sudo chroot /mnt/gentoo /usr/bin/env SYSTEMD_SYSVINIT_PATH=/nonexistent systemctl enable systemd-networkd.service systemd-resolved.service iwd.service
           for s in systemd-networkd systemd-resolved iwd; do
-            echo "$s: $(sudo systemctl --root=/mnt/gentoo is-enabled $s.service || true)"
+            echo "$s: $(sudo chroot /mnt/gentoo /usr/bin/env SYSTEMD_SYSVINIT_PATH=/nonexistent systemctl is-enabled $s.service || true)"
           done
           # resolv.conf must point to the resolved stub (done last: emerge needed the real one)
           sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /mnt/gentoo/etc/resolv.conf
@@ -230,6 +232,7 @@ jobs:
           [Install]
           WantedBy=multi-user.target
           UNIT_EOF
+          # /proc is already unmounted here, so use the host systemctl (no OpenRC script for this unit)
           sudo systemctl --root=/mnt/gentoo enable ci-netcheck.service
 
       - name: Unmount and detach image
