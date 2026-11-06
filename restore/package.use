@@ -3,3 +3,5 @@ gnome-base/gvfs mtp
 net-libs/nodejs npm
 media-video/mpv lua
 media-fonts/terminus-font psf
+# os-prober (dual-boot) требует grub с USE=mount
+sys-boot/grub mount
