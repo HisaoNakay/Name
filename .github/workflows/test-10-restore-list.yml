@@ -1,0 +1,102 @@
+name: Test 10 - Check the Gentoo restore package list (names, masks, binhost coverage)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID of the successful Test 8 run (holds the rootfs artifact)'
+        required: true
+        default: '42297426654'
+      artifact_name:
+        description: 'Rootfs artifact name'
+        required: true
+        default: 'rootfs-hp-network'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  restore-list:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repo (restore/ list)
+        uses: actions/checkout@v4
+
+      - name: Download rootfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: rootfs
+
+      # no disk image needed: the list is only resolved, nothing is installed
+      - name: Extract rootfs into a directory, prepare chroot
+        run: |
+          sudo mkdir -p /mnt/gentoo
+          sudo tar -xpf rootfs/rootfs.tar.zst -I zstd -C /mnt/gentoo --xattrs-include='*.*' --numeric-owner --exclude='./efi/*'
+          rm -rf rootfs
+          sudo rm -f /mnt/gentoo/etc/resolv.conf
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/resolv.conf
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+          sudo mkdir -p /mnt/gentoo/root/restore /mnt/gentoo/etc/portage/package.use /mnt/gentoo/etc/portage/package.license /mnt/gentoo/etc/portage/package.accept_keywords
+          sudo cp restore/* /mnt/gentoo/root/restore/
+          sudo cp restore/package.use /mnt/gentoo/etc/portage/package.use/restore
+          sudo cp restore/package.license /mnt/gentoo/etc/portage/package.license/restore
+          sudo cp restore/package.accept_keywords /mnt/gentoo/etc/portage/package.accept_keywords/restore
+          readlink /mnt/gentoo/etc/portage/make.profile
+          ls /mnt/gentoo/etc/portage/binrepos.conf/ && cat /mnt/gentoo/etc/portage/binrepos.conf/*
+
+      - name: Portage sync
+        run: sudo chroot /mnt/gentoo /bin/bash -c "emerge-webrsync --quiet"
+
+      - name: Check package names and visibility (default profile)
+        run: |
+          sudo chroot /mnt/gentoo /usr/bin/python3 /root/restore/check-atoms.py /root/restore/pkglist.txt | tee atoms.txt
+          {
+            echo "### Test 10: package names (default profile)"
+            echo '```'
+            grep -vE '^ok ' atoms.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # what install.sh does by default: binaries only, nothing compiled on the laptop
+      - name: Resolve sections against the Gentoo binhost
+        run: |
+          cat > sections.sh << 'SEC_EOF'
+          section() { awk -v s="[$1]" '/^\[/{on=($0==s); next} on && !/^#/ && NF{print $1}' /root/restore/pkglist.txt; }
+          for s in "$@"; do
+            echo "===== section [$s]"
+            # mixed mode: binaries where they exist, sources elsewhere -> shows what CI would have to build
+            emerge --pretend --quiet --getbinpkg --usepkg --noreplace --autounmask=n $(section "$s") > "/root/plan-$s.txt" 2>&1
+            rc=$?
+            bin=$(grep -c '^\[binary' "/root/plan-$s.txt")
+            src=$(grep -c '^\[ebuild' "/root/plan-$s.txt")
+            echo "rc=$rc binary=$bin source=$src"
+            echo "[$s] rc=$rc binary=$bin source=$src" >> /root/plan-summary.txt
+            [ "$rc" = 0 ] || tail -n 40 "/root/plan-$s.txt"
+            grep '^\[ebuild' "/root/plan-$s.txt" | head -n 60
+          done
+          SEC_EOF
+          sudo cp sections.sh /mnt/gentoo/root/sections.sh
+          sudo chroot /mnt/gentoo /bin/bash /root/sections.sh base apps dev mate || true
+
+      - name: Same for KDE sections under the plasma profile
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "eselect profile set default/linux/amd64/23.0/desktop/plasma/systemd && eselect profile show"
+          sudo chroot /mnt/gentoo /bin/bash /root/sections.sh kde kde-extra || true
+          {
+            echo "### Test 10: binhost coverage"
+            echo '```'
+            sudo cat /mnt/gentoo/root/plan-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          sudo cat /mnt/gentoo/root/plan-summary.txt
+          grep -q '^problems: 0' atoms.txt || { echo "❌ some package names are wrong or masked, see above"; exit 1; }
