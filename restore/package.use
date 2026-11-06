@@ -1,0 +1,5 @@
+# Нужные USE-флаги. install.sh кладёт файл в /etc/portage/package.use/restore
+gnome-base/gvfs mtp
+net-libs/nodejs npm
+media-video/mpv lua
+media-fonts/terminus-font psf
