@@ -1,0 +1,3 @@
+# Пакеты, у которых в Gentoo пока только тестовая (~amd64) версия
+x11-misc/copyq ~amd64
+sys-apps/cpu-x ~amd64
