@@ -1,0 +1,292 @@
+name: Test 8 - Network stack (networkd + resolved + iwd), save rootfs, boot in QEMU/UEFI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID of the successful Test 6 run (number after /actions/runs/ in its URL)'
+        required: true
+      artifact_name:
+        description: 'Kernel artifact name'
+        required: true
+        default: 'kernel-hp-custom'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  network-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repo (make.conf)
+        uses: actions/checkout@v4
+
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: kernel
+
+      - name: Inspect kernel artifact (config sanity check, non-fatal)
+        run: |
+          echo "--- kernel artifact ---"
+          find kernel -maxdepth 3 | head -50
+          KCFG=$(find kernel -maxdepth 2 \( -name '.config' -o -name 'config' -o -name 'config-*' -o -name '*.config' \) | head -1)
+          echo "KCFG=$KCFG" >> "$GITHUB_ENV"
+          if [ -z "$KCFG" ]; then
+            echo "::notice::No kernel .config found in the artifact, skipping config checks"
+            exit 0
+          fi
+          echo "Using kernel config: $KCFG"
+          for o in CFG80211 RFKILL ASYMMETRIC_KEY_TYPE X509_CERTIFICATE_PARSER PKCS8_PRIVATE_KEY_PARSER PKCS7_MESSAGE_PARSER KEY_DH_OPERATIONS CRYPTO_USER_API_HASH CRYPTO_USER_API_SKCIPHER CRYPTO_AES CRYPTO_CBC CRYPTO_CMAC CRYPTO_ECB CRYPTO_HMAC CRYPTO_MD5 CRYPTO_SHA1 CRYPTO_SHA256 CRYPTO_SHA512 CRYPTO_ARC4 CRYPTO_DES; do
+            grep -q "^CONFIG_$o=y" "$KCFG" || echo "::warning::CONFIG_$o is not =y (needed by iwd; =m works only if modules are shipped)"
+          done
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf parted dosfstools e2fsprogs zstd
+
+      - name: Create disk image (GPT, ESP 512MiB FAT32, root ext4)
+        run: |
+          truncate -s 10G disk.img
+          LOOP=$(sudo losetup -fP --show disk.img)
+          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo parted -s "$LOOP" mklabel gpt \
+            mkpart ESP fat32 1MiB 513MiB set 1 esp on \
+            mkpart root ext4 513MiB 100%
+          sudo partprobe "$LOOP" || true
+          sudo udevadm settle || true
+          ls -l ${LOOP}*
+          sudo mkfs.vfat -F32 "${LOOP}p1"
+          sudo mkfs.ext4 -F -L gentoo-root "${LOOP}p2"
+          sudo mkdir -p /mnt/gentoo
+          sudo mount "${LOOP}p2" /mnt/gentoo
+          sudo mkdir -p /mnt/gentoo/efi
+          sudo mount "${LOOP}p1" /mnt/gentoo/efi
+          lsblk -f "$LOOP"
+
+      - name: Find latest stage3 (amd64-systemd)
+        id: find
+        run: |
+          BASE=https://distfiles.gentoo.org/releases/amd64/autobuilds
+          PATH_LINE=$(curl -fsSL "$BASE/latest-stage3-amd64-systemd.txt" | grep -E '\.tar\.xz' | head -1 | cut -d' ' -f1)
+          test -n "$PATH_LINE"
+          echo "url=$BASE/$PATH_LINE" >> "$GITHUB_OUTPUT"
+
+      - name: Extract stage3 onto the image
+        run: |
+          curl -fL --retry 3 -o stage3.tar.xz "${{ steps.find.outputs.url }}"
+          sudo tar xpf stage3.tar.xz -C /mnt/gentoo --xattrs-include='*.*' --numeric-owner
+          rm -f stage3.tar.xz
+          df -h /mnt/gentoo
+
+      - name: Prepare chroot mounts
+        run: |
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+
+      - name: make.conf (portable flags), Portage sync, emerge GRUB
+        run: |
+          sudo cp make.conf /mnt/gentoo/etc/portage/make.conf
+          sudo sed -i 's/^COMMON_FLAGS=.*/COMMON_FLAGS="-O2 -pipe"/' /mnt/gentoo/etc/portage/make.conf
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            emerge-webrsync
+            emerge --quiet-build sys-boot/grub
+            grub-install --version
+          "
+
+      - name: Emerge network stack (iwd, linux-firmware)
+        run: |
+          sudo tee /mnt/gentoo/root/ci-net.sh > /dev/null << 'CHROOT_EOF'
+          set -e
+          # add a line to package.use / package.license, whether it is a file or a directory
+          padd() {
+            f="/etc/portage/$1"
+            if [ -f "$f" ]; then
+              echo "$2" >> "$f"
+            else
+              mkdir -p "$f"
+              echo "$2" > "$f/ci-network"
+            fi
+          }
+          # firmware is not "free": allow its licenses for this package only
+          padd package.license 'sys-kernel/linux-firmware linux-fw-redistributable no-source-code'
+          # make sure systemd ships networkd and resolved
+          if ! ls /usr/lib/systemd/system/systemd-networkd.service /usr/lib/systemd/system/systemd-resolved.service > /dev/null 2>&1; then
+            echo ">>> networkd/resolved missing, rebuilding systemd with those USE flags"
+            padd package.use 'sys-apps/systemd networkd resolved'
+            emerge --quiet-build --oneshot sys-apps/systemd
+          fi
+          emerge --quiet-build net-wireless/iwd sys-kernel/linux-firmware
+          ls -l /usr/lib/systemd/system/systemd-networkd.service /usr/lib/systemd/system/systemd-resolved.service /usr/lib/systemd/system/iwd.service
+          df -h /
+          CHROOT_EOF
+          sudo chroot /mnt/gentoo /bin/bash /root/ci-net.sh
+          sudo rm -f /mnt/gentoo/root/ci-net.sh
+
+      - name: Install kernel, modules (if any), fstab, first-boot settings
+        run: |
+          ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP}p2")
+          ESP_UUID=$(sudo blkid -s UUID -o value "${LOOP}p1")
+          echo "ROOT_UUID=$ROOT_UUID" >> "$GITHUB_ENV"
+          sudo cp kernel/bzImage /mnt/gentoo/boot/vmlinuz
+          if [ -d kernel/lib/modules ]; then
+            sudo mkdir -p /mnt/gentoo/lib/modules
+            sudo cp -a kernel/lib/modules/. /mnt/gentoo/lib/modules/
+            echo "Kernel modules installed:"
+            ls /mnt/gentoo/lib/modules
+          else
+            echo "::notice::No kernel/lib/modules in the artifact: only built-in (=y) drivers will work"
+          fi
+          printf 'UUID=%s / ext4 defaults 0 1\nUUID=%s /efi vfat umask=0077 0 2\n' "$ROOT_UUID" "$ESP_UUID" | sudo tee /mnt/gentoo/etc/fstab
+          sudo systemd-firstboot --root=/mnt/gentoo --force --locale=C.UTF-8 --timezone=UTC --hostname=gentoo-hp --root-password=gentoo
+          sudo systemd-machine-id-setup --root=/mnt/gentoo || true
+
+      - name: Install GRUB (UEFI, removable path) and write grub.cfg
+        run: |
+          ROOT_PARTUUID=$(sudo blkid -s PARTUUID -o value "${LOOP}p2")
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            grub-install --target=x86_64-efi --efi-directory=/efi --boot-directory=/boot --removable --no-nvram
+          "
+          {
+            echo 'set timeout=1'
+            echo 'menuentry "Gentoo (HP custom kernel)" {'
+            echo "  search --no-floppy --fs-uuid --set=root $ROOT_UUID"
+            echo "  linux /boot/vmlinuz root=PARTUUID=$ROOT_PARTUUID ro console=tty0 console=ttyS0,115200"
+            echo '}'
+          } | sudo tee /mnt/gentoo/boot/grub/grub.cfg > /dev/null
+          echo "--- ESP contents ---"
+          sudo find /mnt/gentoo/efi -type f
+          echo "--- grub.cfg ---"
+          cat /mnt/gentoo/boot/grub/grub.cfg
+
+      - name: Configure networking (networkd, resolved, iwd)
+        run: |
+          sudo mkdir -p /mnt/gentoo/etc/systemd/network /mnt/gentoo/etc/iwd
+          printf '[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\n\n[DHCPv4]\nRouteMetric=100\n' | sudo tee /mnt/gentoo/etc/systemd/network/20-wired.network > /dev/null
+          printf '[Match]\nName=wl*\n\n[Network]\nDHCP=yes\nIgnoreCarrierLoss=3s\n\n[DHCPv4]\nRouteMetric=600\n' | sudo tee /mnt/gentoo/etc/systemd/network/25-wireless.network > /dev/null
+          printf '[General]\nEnableNetworkConfiguration=false\n\n[Network]\nNameResolvingService=systemd\n' | sudo tee /mnt/gentoo/etc/iwd/main.conf > /dev/null
+          sudo systemctl --root=/mnt/gentoo enable systemd-networkd.service systemd-resolved.service iwd.service
+          for s in systemd-networkd systemd-resolved iwd; do
+            echo "$s: $(sudo systemctl --root=/mnt/gentoo is-enabled $s.service || true)"
+          done
+          # resolv.conf must point to the resolved stub (done last: emerge needed the real one)
+          sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /mnt/gentoo/etc/resolv.conf
+          ls -l /mnt/gentoo/etc/resolv.conf /mnt/gentoo/etc/systemd/network/
+
+      - name: Save rootfs as tar.zst
+        run: |
+          for m in dev sys proc; do
+            sudo umount -R "/mnt/gentoo/$m" || sudo umount -l -R "/mnt/gentoo/$m" || true
+          done
+          sync
+          sudo tar --xattrs --xattrs-include='*.*' --numeric-owner -I 'zstd -T0 -10' \
+            -cpf rootfs.tar.zst -C /mnt/gentoo \
+            --exclude='./var/db/repos/gentoo/*' \
+            --exclude='./var/cache/distfiles/*' \
+            --exclude='./var/cache/binpkgs/*' \
+            --exclude='./var/tmp/portage/*' \
+            --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' --exclude='./run/*' \
+            .
+          sudo chown "$USER" rootfs.tar.zst
+          ls -lh rootfs.tar.zst
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-hp-network
+          path: rootfs.tar.zst
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Add CI-only network check service (not part of the saved rootfs)
+        run: |
+          sudo tee /mnt/gentoo/etc/systemd/system/ci-netcheck.service > /dev/null << 'UNIT_EOF'
+          [Unit]
+          Description=CI network check
+          Wants=network-online.target
+          After=network-online.target
+
+          [Service]
+          Type=oneshot
+          TimeoutStartSec=300
+          StandardOutput=journal+console
+          StandardError=journal+console
+          ExecStart=/bin/sh -c 'networkctl --no-pager; ip -4 -br addr; echo "iwd enabled: $(systemctl is-enabled iwd.service)"; if ip -4 -o addr show scope global | grep -q inet && getent hosts distfiles.gentoo.org; then echo NETCHECK-OK; else echo NETCHECK-FAIL; fi'
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT_EOF
+          sudo systemctl --root=/mnt/gentoo enable ci-netcheck.service
+
+      - name: Unmount and detach image
+        run: |
+          sync
+          sudo umount -R /mnt/gentoo || sudo umount -l -R /mnt/gentoo
+          sudo losetup -d "$LOOP"
+
+      - name: Boot image in QEMU (UEFI, AHCI disk, user-mode network)
+        run: |
+          CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+          VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
+          [ -f "$CODE" ] && [ -f "$VARS_SRC" ] || { echo "OVMF 4M files missing"; ls -l /usr/share/OVMF; exit 1; }
+          cp "$VARS_SRC" /tmp/OVMF_VARS.fd
+
+          # pick a NIC model that the custom kernel can actually drive
+          NIC=virtio-net-pci
+          if [ -n "$KCFG" ] && [ -f "$KCFG" ]; then
+            if grep -q '^CONFIG_VIRTIO_NET=y' "$KCFG"; then NIC=virtio-net-pci
+            elif grep -q '^CONFIG_E1000=y' "$KCFG"; then NIC=e1000
+            elif grep -q '^CONFIG_E1000E=y' "$KCFG"; then NIC=e1000e
+            elif grep -q '^CONFIG_8139TOO=y' "$KCFG"; then NIC=rtl8139
+            else echo "::warning::Kernel config has no built-in NIC driver that QEMU can emulate (virtio_net / e1000 / e1000e / 8139too)"
+            fi
+          else
+            echo "::notice::No kernel config available, assuming virtio-net"
+          fi
+          echo "Using NIC model: $NIC"
+
+          : > boot.log
+          qemu-system-x86_64 \
+            -machine q35 \
+            -drive if=pflash,format=raw,readonly=on,file="$CODE" \
+            -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+            -m 2048 -smp 2 \
+            -device ich9-ahci,id=ahci \
+            -drive file=disk.img,format=raw,if=none,id=d0 \
+            -device ide-hd,drive=d0,bus=ahci.0 \
+            -netdev user,id=n0 -device "$NIC,netdev=n0" \
+            -display none -serial file:boot.log -monitor none -no-reboot &
+          QPID=$!
+
+          for i in $(seq 1 400); do
+            grep -qE 'NETCHECK-(OK|FAIL)' boot.log && break
+            kill -0 "$QPID" 2>/dev/null || break
+            sleep 1
+          done
+          sleep 2
+          kill "$QPID" 2>/dev/null || true
+          wait "$QPID" 2>/dev/null || true
+
+          echo "----- boot.log -----"
+          cat boot.log
+          echo "-----"
+          if grep -q 'NETCHECK-OK' boot.log; then
+            echo "✅ Network is up: IPv4 address obtained and DNS works"
+          else
+            echo "❌ Network check failed or did not run - see log above"
+            exit 1
+          fi
