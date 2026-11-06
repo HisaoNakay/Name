@@ -84,13 +84,33 @@ jobs:
             ls -lh arch/x86/boot/bzImage
           "
 
+      - name: Install modules (stripped) into a staging dir
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            cd /usr/src/linux
+            rm -rf /tmp/modstage
+            make INSTALL_MOD_PATH=/tmp/modstage INSTALL_MOD_STRIP=1 modules_install
+            # build/source are symlinks to /usr/src/linux, they are useless in the image
+            rm -f /tmp/modstage/lib/modules/*/build /tmp/modstage/lib/modules/*/source
+            ls /tmp/modstage/lib/modules
+            du -sh /tmp/modstage/lib/modules
+          "
+
       - name: Collect artifacts
         run: |
-          mkdir -p out
+          mkdir -p out/lib
           sudo cp /mnt/gentoo/usr/src/linux/arch/x86/boot/bzImage out/
           sudo cp /mnt/gentoo/usr/src/linux/.config out/config-hp
           sudo cp /mnt/gentoo/usr/src/linux/System.map out/
+          sudo cp -a /mnt/gentoo/tmp/modstage/lib/modules out/lib/
           sudo chown -R runner:runner out
+          echo "--- HP drivers present as modules? ---"
+          for m in r8169 realtek rtl8723be rtlwifi rtl_pci cfg80211 mac80211 btusb btrtl radeon amdgpu snd-hda-intel; do
+            f=$(find out/lib/modules -name "${m//-/[-_]}.ko*" | head -1)
+            echo "$m: ${f:-MISSING}"
+          done
+          du -sh out
 
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
