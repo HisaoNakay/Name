@@ -67,30 +67,37 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # what install.sh does by default: binaries only, nothing compiled on the laptop
-      - name: Resolve sections against the Gentoo binhost
+      # same command as install.sh, in mixed mode (binaries where they exist, sources elsewhere),
+      # so the plan shows what CI would still have to build; then binary-only like install.sh by default
+      - name: Write section resolver
         run: |
           cat > sections.sh << 'SEC_EOF'
           section() { awk -v s="[$1]" '/^\[/{on=($0==s); next} on && !/^#/ && NF{print $1}' /root/restore/pkglist.txt; }
           for s in "$@"; do
-            echo "===== section [$s]"
-            # mixed mode: binaries where they exist, sources elsewhere -> shows what CI would have to build
-            emerge --pretend --quiet --getbinpkg --usepkg --noreplace --autounmask=n $(section "$s") > "/root/plan-$s.txt" 2>&1
+            echo "===== section [$s] ($(eselect profile show | tail -n 1 | xargs))"
+            emerge --pretend --quiet --update --deep --newuse --getbinpkg --usepkg --autounmask=n @world $(section "$s") > "/root/plan-$s.txt" 2>&1
             rc=$?
             bin=$(grep -c '^\[binary' "/root/plan-$s.txt")
             src=$(grep -c '^\[ebuild' "/root/plan-$s.txt")
-            echo "rc=$rc binary=$bin source=$src"
-            echo "[$s] rc=$rc binary=$bin source=$src" >> /root/plan-summary.txt
-            [ "$rc" = 0 ] || tail -n 40 "/root/plan-$s.txt"
-            grep '^\[ebuild' "/root/plan-$s.txt" | head -n 60
+            emerge --pretend --quiet --update --deep --newuse --getbinpkg --usepkg --getbinpkgonly --autounmask=n @world $(section "$s") > "/root/binonly-$s.txt" 2>&1
+            brc=$?
+            echo "[$s] resolve rc=$rc, binary=$bin, source=$src, binary-only rc=$brc" | tee -a /root/plan-summary.txt
+            [ "$rc" = 0 ] || grep -vE 'news|^$' "/root/plan-$s.txt" | tail -n 40
+            echo "--- to build from source:"
+            grep '^\[ebuild' "/root/plan-$s.txt" | head -n 80
+            [ "$brc" = 0 ] || { echo "--- binary-only failure:"; grep -vE 'news|^$' "/root/binonly-$s.txt" | tail -n 25; }
           done
           SEC_EOF
           sudo cp sections.sh /mnt/gentoo/root/sections.sh
+
+      - name: Resolve base/apps/dev/mate under the desktop profile
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "eselect profile set default/linux/amd64/23.0/desktop/systemd"
           sudo chroot /mnt/gentoo /bin/bash /root/sections.sh base apps dev mate || true
 
-      - name: Same for KDE sections under the plasma profile
+      - name: Resolve KDE sections under the plasma profile
         run: |
-          sudo chroot /mnt/gentoo /bin/bash -c "eselect profile set default/linux/amd64/23.0/desktop/plasma/systemd && eselect profile show"
+          sudo chroot /mnt/gentoo /bin/bash -c "eselect profile set default/linux/amd64/23.0/desktop/plasma/systemd"
           sudo chroot /mnt/gentoo /bin/bash /root/sections.sh kde kde-extra || true
           {
             echo "### Test 10: binhost coverage"
@@ -99,4 +106,5 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           sudo cat /mnt/gentoo/root/plan-summary.txt
+          grep USE= /mnt/gentoo/etc/portage/make.conf || true
           grep -q '^problems: 0' atoms.txt || { echo "❌ some package names are wrong or masked, see above"; exit 1; }
