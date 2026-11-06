@@ -40,7 +40,6 @@ media-fonts/dejavu
 media-fonts/liberation-fonts
 
 [apps]
-www-client/firefox-bin
 media-video/mpv
 media-video/vlc
 media-sound/strawberry
@@ -124,15 +123,6 @@ dev-util/kdevelop
 app-cdr/isoimagewriter
 gui-apps/sddm
 kde-plasma/sddm-kcm
-
-# Всё остальное из KDE Gear, что стояло на Arch: игры, обучалки, SDK (долго собирать)
-[kde-extra]
-kde-apps/kdegames-meta
-kde-apps/kdeedu-meta
-kde-apps/kdesdk-meta
-kde-apps/kdeutils-meta
-kde-apps/kdemultimedia-meta
-kde-apps/kdeaccessibility-meta
 
 # Если вместо KDE будет MATE (план Stage 5)
 [mate]
