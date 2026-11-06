@@ -1,5 +1,6 @@
 # Программы для Gentoo — аналог ../pkglist-native.txt + ../pkglist-aur.txt (снимок Arch 07.11).
 # Секции [имя] ставятся по выбору: ./install.sh base apps dev kde
+# Графические секции (apps, dev, kde, mate) требуют desktop-профиль — install.sh проверяет.
 # Базовую систему (ядро, grub, сеть networkd+iwd, прошивки) ставит сборка из HisaoNakay/Name, здесь её нет.
 
 [base]
@@ -54,8 +55,7 @@ dev-util/android-tools
 sys-apps/flatpak
 gnome-base/gvfs
 sys-apps/cpu-x
-x11-apps/radeontop
-games-util/mangohud
+app-misc/radeontop
 gui-apps/wl-clipboard
 x11-base/xorg-server
 x11-base/xwayland
@@ -73,7 +73,6 @@ x11-apps/mesa-progs
 net-libs/nodejs
 dev-lang/tk
 dev-python/pip
-dev-python/pipx
 dev-python/python-dotenv
 dev-python/markdown2
 dev-python/numpy
@@ -91,22 +90,20 @@ kde-apps/kate
 kde-apps/ark
 kde-apps/gwenview
 kde-apps/okular
-kde-apps/spectacle
+kde-plasma/spectacle
 kde-apps/kcalc
 kde-apps/filelight
 kde-apps/kfind
 kde-apps/sweeper
 kde-apps/kwalletmanager
-kde-apps/partitionmanager
+sys-block/partitionmanager
 kde-misc/kdeconnect
 kde-apps/ksystemlog
 kde-apps/kio-extras
-kde-apps/kio-admin
 kde-apps/ffmpegthumbs
-kde-apps/kdegraphics-thumbnailers
+kde-apps/thumbnailers
 kde-apps/kdenetwork-filesharing
-kde-apps/kio-zeroconf
-kde-apps/kio-gdrive
+kde-misc/kio-gdrive
 kde-plasma/kgamma
 kde-plasma/plasma-browser-integration
 kde-plasma/plasma-firewall
@@ -114,18 +111,18 @@ kde-plasma/plasma-vault
 kde-plasma/plasma-disks
 kde-plasma/kwin-x11
 kde-misc/colord-kde
-kde-misc/wacomtablet
+kde-plasma/wacomtablet
 kde-apps/kolourpaint
 kde-apps/kwave
 kde-apps/krdc
 kde-apps/krfb
-kde-apps/ktorrent
+net-p2p/ktorrent
 net-irc/konversation
 kde-apps/kget
 www-client/falkon
 dev-util/kdevelop
 app-cdr/isoimagewriter
-x11-misc/sddm
+gui-apps/sddm
 kde-plasma/sddm-kcm
 
 # Всё остальное из KDE Gear, что стояло на Arch: игры, обучалки, SDK (долго собирать)
