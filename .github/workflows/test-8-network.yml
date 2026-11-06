@@ -43,8 +43,11 @@ jobs:
             exit 0
           fi
           echo "Using kernel config: $KCFG"
+          # with lib/modules in the artifact a module (=m) is as good as built-in
+          OK_VALS=y
+          [ -d kernel/lib/modules ] && OK_VALS='[ym]'
           for o in CFG80211 RFKILL ASYMMETRIC_KEY_TYPE X509_CERTIFICATE_PARSER PKCS8_PRIVATE_KEY_PARSER PKCS7_MESSAGE_PARSER KEY_DH_OPERATIONS CRYPTO_USER_API_HASH CRYPTO_USER_API_SKCIPHER CRYPTO_AES CRYPTO_CBC CRYPTO_CMAC CRYPTO_ECB CRYPTO_HMAC CRYPTO_MD5 CRYPTO_SHA1 CRYPTO_SHA256 CRYPTO_SHA512 CRYPTO_ARC4 CRYPTO_DES; do
-            grep -q "^CONFIG_$o=y" "$KCFG" || echo "::warning::CONFIG_$o is not =y (needed by iwd; =m works only if modules are shipped)"
+            grep -q "^CONFIG_$o=$OK_VALS" "$KCFG" || echo "::warning::CONFIG_$o is not enabled the way iwd needs it (=y, or =m with modules shipped)"
           done
 
       - name: Install host tools
@@ -106,8 +109,9 @@ jobs:
             grub-install --version
           "
 
-      - name: Emerge network stack (iwd, linux-firmware)
+      - name: Emerge network stack (iwd, linux-firmware trimmed to HP)
         run: |
+          sudo cp linux-firmware.savedconfig /mnt/gentoo/root/linux-firmware.savedconfig
           sudo tee /mnt/gentoo/root/ci-net.sh > /dev/null << 'CHROOT_EOF'
           set -e
           # add a line to package.use / package.license, whether it is a file or a directory
@@ -117,11 +121,15 @@ jobs:
               echo "$2" >> "$f"
             else
               mkdir -p "$f"
-              echo "$2" > "$f/ci-network"
+              echo "$2" >> "$f/ci-network"
             fi
           }
           # firmware is not "free": allow its licenses for this package only
           padd package.license 'sys-kernel/linux-firmware linux-fw-redistributable no-source-code'
+          # install only the firmware files HP needs (list lives in the repo)
+          padd package.use 'sys-kernel/linux-firmware savedconfig'
+          mkdir -p /etc/portage/savedconfig/sys-kernel
+          cp /root/linux-firmware.savedconfig /etc/portage/savedconfig/sys-kernel/linux-firmware
           # make sure systemd ships networkd and resolved
           if ! ls /usr/lib/systemd/system/systemd-networkd.service /usr/lib/systemd/system/systemd-resolved.service > /dev/null 2>&1; then
             echo ">>> networkd/resolved missing, rebuilding systemd with those USE flags"
@@ -130,10 +138,20 @@ jobs:
           fi
           emerge --quiet-build net-wireless/iwd sys-kernel/linux-firmware
           ls -l /usr/lib/systemd/system/systemd-networkd.service /usr/lib/systemd/system/systemd-resolved.service /usr/lib/systemd/system/iwd.service
+          echo "--- /lib/firmware: $(du -sh /lib/firmware | cut -f1), $(find /lib/firmware ! -type d | wc -l) files ---"
+          find /lib/firmware ! -type d | sed 's|^/lib/firmware/||' | sort
+          # every listed file must be installed (possibly compressed): a miss means a wrong name in the list
+          miss=0
+          while read -r f; do
+            case "$f" in '#'*|'') continue ;; esac
+            ls /lib/firmware/"$f" /lib/firmware/"$f".xz /lib/firmware/"$f".zst > /dev/null 2>&1 || { echo "MISSING firmware: $f"; miss=1; }
+          done < /root/linux-firmware.savedconfig
+          [ "$miss" = 0 ] || exit 1
+          echo "all listed firmware installed"
           df -h /
           CHROOT_EOF
           sudo chroot /mnt/gentoo /bin/bash /root/ci-net.sh
-          sudo rm -f /mnt/gentoo/root/ci-net.sh
+          sudo rm -f /mnt/gentoo/root/ci-net.sh /mnt/gentoo/root/linux-firmware.savedconfig
 
       - name: Install kernel, modules (if any), fstab, first-boot settings
         run: |
