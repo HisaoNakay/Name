@@ -5,3 +5,7 @@ media-video/mpv lua
 media-fonts/terminus-font psf
 # os-prober (dual-boot) требует grub с USE=mount
 sys-boot/grub mount
+# зависимости, найденные Test 10 (MATE-трей, samba для KDE, Qt Designer для kdesdk)
+dev-libs/libdbusmenu gtk3
+net-libs/ngtcp2 gnutls
+dev-qt/qttools designer
