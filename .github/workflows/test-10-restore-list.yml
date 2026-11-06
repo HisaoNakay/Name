@@ -98,7 +98,7 @@ jobs:
       - name: Resolve KDE sections under the plasma profile
         run: |
           sudo chroot /mnt/gentoo /bin/bash -c "eselect profile set default/linux/amd64/23.0/desktop/plasma/systemd"
-          sudo chroot /mnt/gentoo /bin/bash /root/sections.sh kde kde-extra || true
+          sudo chroot /mnt/gentoo /bin/bash /root/sections.sh kde || true
           {
             echo "### Test 10: binhost coverage"
             echo '```'
