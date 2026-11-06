@@ -1,0 +1,32 @@
+# linux-firmware.savedconfig — прошивки только для HP Pavilion 15 (A10-5745M)
+# Кладётся в /etc/portage/savedconfig/sys-kernel/linux-firmware, пакет ставится с USE=savedconfig:
+# всё, чего нет в списке, при установке удаляется.
+# Wi-Fi, Bluetooth и Ethernet сверены с тем, что реально загрузило ядро на Arch (06.11).
+# Wi-Fi: RTL8723BE (драйвер rtl8723be)
+rtlwifi/rtl8723befw_36.bin
+rtlwifi/rtl8723befw.bin
+# Bluetooth: Realtek USB 0bda:b001 (btusb + btrtl); rtl8723b_config.bin — ссылка на rtl8723bs_config.bin
+rtl_bt/rtl8723b_fw.bin
+rtl_bt/rtl8723b_config.bin
+rtl_bt/rtl8723bs_config.bin
+# Ethernet: RTL8106e, XID 449 (r8169)
+rtl_nic/rtl8106e-1.fw
+rtl_nic/rtl8106e-2.fw
+# iGPU Richland / HD 8610G (radeon, семейство ARUBA): CP/RLC, видеодекодер UVD, видеокодер VCE
+radeon/ARUBA_me.bin
+radeon/ARUBA_pfp.bin
+radeon/ARUBA_rlc.bin
+radeon/TAHITI_uvd.bin
+radeon/TAHITI_vce.bin
+# dGPU Topaz XT / R7 M260 (amdgpu, семейство VI)
+amdgpu/topaz_ce.bin
+amdgpu/topaz_k_smc.bin
+amdgpu/topaz_mc.bin
+amdgpu/topaz_me.bin
+amdgpu/topaz_mec.bin
+amdgpu/topaz_mec2.bin
+amdgpu/topaz_pfp.bin
+amdgpu/topaz_rlc.bin
+amdgpu/topaz_sdma.bin
+amdgpu/topaz_sdma1.bin
+amdgpu/topaz_smc.bin
