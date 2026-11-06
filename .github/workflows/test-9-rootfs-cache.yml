@@ -1,0 +1,232 @@
+name: Test 9 - Restore rootfs artifact, binpkg cache, boot in QEMU/UEFI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID of the successful Test 8 run (holds the rootfs artifact)'
+        required: true
+        default: '42286744664'
+      artifact_name:
+        description: 'Rootfs artifact name'
+        required: true
+        default: 'rootfs-hp-network'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  rootfs-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repo (make.conf)
+        uses: actions/checkout@v4
+
+      - name: Download rootfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: rootfs
+
+      # binpkgs/ and distfiles/ live in the workspace and are bind-mounted into the chroot,
+      # so actions/cache can save and restore them as the runner user
+      - name: Restore Portage cache (binpkgs + distfiles)
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            binpkgs
+            distfiles
+          key: gentoo-hp-pkgcache-${{ github.run_id }}
+          restore-keys: |
+            gentoo-hp-pkgcache-
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf parted dosfstools e2fsprogs zstd
+          mkdir -p binpkgs distfiles
+          echo "--- restored cache ---"
+          du -sh binpkgs distfiles
+          find binpkgs -name '*.gpkg.tar' -o -name '*.tbz2' | sed 's|^binpkgs/||' | sort
+
+      - name: Create disk image (GPT, ESP 512MiB FAT32, root ext4)
+        run: |
+          truncate -s 10G disk.img
+          LOOP=$(sudo losetup -fP --show disk.img)
+          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo parted -s "$LOOP" mklabel gpt \
+            mkpart ESP fat32 1MiB 513MiB set 1 esp on \
+            mkpart root ext4 513MiB 100%
+          sudo partprobe "$LOOP" || true
+          sudo udevadm settle || true
+          sudo mkfs.vfat -F32 "${LOOP}p1"
+          sudo mkfs.ext4 -F -L gentoo-root "${LOOP}p2"
+          sudo mkdir -p /mnt/gentoo
+          sudo mount "${LOOP}p2" /mnt/gentoo
+          sudo mkdir -p /mnt/gentoo/efi
+          sudo mount "${LOOP}p1" /mnt/gentoo/efi
+          lsblk -f "$LOOP"
+
+      - name: Extract rootfs onto the image
+        run: |
+          ls -lh rootfs/
+          # ESP contents are skipped: FAT32 cannot take owners/xattrs, and grub-install refills it below
+          sudo tar -xpf rootfs/rootfs.tar.zst -I zstd -C /mnt/gentoo --xattrs-include='*.*' --numeric-owner --exclude='./efi/*'
+          rm -rf rootfs
+          ls -l /mnt/gentoo/boot
+          ls /mnt/gentoo/lib/modules
+          df -h /mnt/gentoo
+
+      - name: Prepare chroot mounts
+        run: |
+          # /etc/resolv.conf in the rootfs is a symlink to the resolved stub; emerge needs a real file
+          sudo rm -f /mnt/gentoo/etc/resolv.conf
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/resolv.conf
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+          sudo mkdir -p /mnt/gentoo/var/cache/binpkgs /mnt/gentoo/var/cache/distfiles
+          sudo mount --bind "$PWD/binpkgs" /mnt/gentoo/var/cache/binpkgs
+          sudo mount --bind "$PWD/distfiles" /mnt/gentoo/var/cache/distfiles
+
+      - name: make.conf (portable flags + buildpkg/usepkg), Portage sync
+        run: |
+          sudo cp make.conf /mnt/gentoo/etc/portage/make.conf
+          sudo sed -i 's/^COMMON_FLAGS=.*/COMMON_FLAGS="-O2 -pipe"/' /mnt/gentoo/etc/portage/make.conf
+          printf '\n# CI: keep every built package and reuse it on the next run\nFEATURES="${FEATURES} buildpkg"\nEMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --usepkg"\n' | sudo tee -a /mnt/gentoo/etc/portage/make.conf > /dev/null
+          tail -n 4 /mnt/gentoo/etc/portage/make.conf
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            chown portage:portage /var/cache/binpkgs /var/cache/distfiles
+            emerge-webrsync
+          "
+
+      - name: Emerge test packages (pciutils, usbutils, wireless-regdb)
+        run: |
+          PKGS="sys-apps/pciutils sys-apps/usbutils net-wireless/wireless-regdb"
+          sudo chroot /mnt/gentoo /bin/bash -c "emerge --pretend --quiet $PKGS" | tee plan.txt
+          BIN=$(grep -c '^\[binary' plan.txt || true)
+          SRC=$(grep -c '^\[ebuild' plan.txt || true)
+          echo "from binpkg cache: $BIN, built from source: $SRC"
+          START=$(date +%s)
+          sudo chroot /mnt/gentoo /bin/bash -c "set -e; emerge --quiet-build $PKGS"
+          TOOK=$(( $(date +%s) - START ))
+          {
+            echo "### Test 9: package install"
+            echo "- from binpkg cache: **$BIN**"
+            echo "- built from source: **$SRC**"
+            echo "- emerge time: **${TOOK}s**"
+          } >> "$GITHUB_STEP_SUMMARY"
+          ls -l /mnt/gentoo/lib/firmware/regulatory.db*
+
+      - name: Regenerate fstab, reinstall GRUB, write grub.cfg (UUIDs changed after mkfs)
+        run: |
+          ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP}p2")
+          ESP_UUID=$(sudo blkid -s UUID -o value "${LOOP}p1")
+          ROOT_PARTUUID=$(sudo blkid -s PARTUUID -o value "${LOOP}p2")
+          printf 'UUID=%s / ext4 defaults 0 1\nUUID=%s /efi vfat umask=0077 0 2\n' "$ROOT_UUID" "$ESP_UUID" | sudo tee /mnt/gentoo/etc/fstab
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            grub-install --target=x86_64-efi --efi-directory=/efi --boot-directory=/boot --removable --no-nvram
+          "
+          {
+            echo 'set timeout=1'
+            echo 'menuentry "Gentoo (HP custom kernel)" {'
+            echo "  search --no-floppy --fs-uuid --set=root $ROOT_UUID"
+            echo "  linux /boot/vmlinuz root=PARTUUID=$ROOT_PARTUUID ro console=tty0 console=ttyS0,115200"
+            echo '}'
+          } | sudo tee /mnt/gentoo/boot/grub/grub.cfg > /dev/null
+          cat /mnt/gentoo/boot/grub/grub.cfg
+
+      - name: Release chroot mounts, restore resolv.conf symlink
+        if: always()
+        run: |
+          for m in var/cache/binpkgs var/cache/distfiles dev sys proc; do
+            sudo umount -R "/mnt/gentoo/$m" || sudo umount -l -R "/mnt/gentoo/$m" || true
+          done
+          sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /mnt/gentoo/etc/resolv.conf
+          # make the cache readable for actions/cache
+          sudo chown -R "$USER" binpkgs distfiles
+          du -sh binpkgs distfiles
+
+      # saved even if a later step fails, so long builds are never lost
+      - name: Save Portage cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            binpkgs
+            distfiles
+          key: gentoo-hp-pkgcache-${{ github.run_id }}
+
+      - name: Add CI-only check service
+        run: |
+          sudo tee /mnt/gentoo/etc/systemd/system/ci-check.service > /dev/null << 'UNIT_EOF'
+          [Unit]
+          Description=CI check (Test 9)
+          Wants=network-online.target
+          After=network-online.target iwd.service
+
+          [Service]
+          Type=oneshot
+          TimeoutStartSec=300
+          StandardOutput=journal+console
+          StandardError=journal+console
+          ExecStart=/bin/sh -c 'uname -r; lspci -nn; lsusb; ls -l /lib/firmware/regulatory.db; networkctl --no-pager; echo "iwd: $(systemctl is-active iwd.service)"; if ip -4 -o addr show scope global | grep -q inet && getent hosts distfiles.gentoo.org && command -v lspci && command -v lsusb && [ -f /lib/firmware/regulatory.db ] && systemctl is-active -q iwd.service; then echo CI9-OK; else echo CI9-FAIL; fi'
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT_EOF
+          sudo systemctl --root=/mnt/gentoo enable ci-check.service
+
+      - name: Unmount and detach image
+        run: |
+          sync
+          sudo umount -R /mnt/gentoo || sudo umount -l -R /mnt/gentoo
+          sudo losetup -d "$LOOP"
+
+      - name: Boot image in QEMU (UEFI, AHCI disk, virtio network)
+        run: |
+          CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+          VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
+          [ -f "$CODE" ] && [ -f "$VARS_SRC" ] || { echo "OVMF 4M files missing"; ls -l /usr/share/OVMF; exit 1; }
+          cp "$VARS_SRC" /tmp/OVMF_VARS.fd
+
+          : > boot.log
+          qemu-system-x86_64 \
+            -machine q35 \
+            -drive if=pflash,format=raw,readonly=on,file="$CODE" \
+            -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+            -m 2048 -smp 2 \
+            -device ich9-ahci,id=ahci \
+            -drive file=disk.img,format=raw,if=none,id=d0 \
+            -device ide-hd,drive=d0,bus=ahci.0 \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+            -display none -serial file:boot.log -monitor none -no-reboot &
+          QPID=$!
+
+          for i in $(seq 1 400); do
+            grep -qE 'CI9-(OK|FAIL)' boot.log && break
+            kill -0 "$QPID" 2>/dev/null || break
+            sleep 1
+          done
+          sleep 2
+          kill "$QPID" 2>/dev/null || true
+          wait "$QPID" 2>/dev/null || true
+
+          echo "----- boot.log -----"
+          cat boot.log
+          echo "-----"
+          if grep -q 'CI9-OK' boot.log; then
+            echo "✅ Restored rootfs boots: network, DNS, iwd, pciutils/usbutils, regulatory.db"
+          else
+            echo "❌ Check failed or did not run - see log above"
+            exit 1
+          fi
