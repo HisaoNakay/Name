@@ -57,7 +57,7 @@ jobs:
             if ! grep -qx "$k=$v" .config; then echo "NOT APPLIED: $k=$v"; bad=1; fi
           done < /tmp/hp-kernel.config
           [ $bad = 0 ] && echo "all fragment options applied"
-          exit 0
+          exit $bad
           VEOF
           sudo cp verify.sh /mnt/gentoo/tmp/verify.sh
           sudo cp hp-kernel.config /mnt/gentoo/tmp/hp-kernel.config
