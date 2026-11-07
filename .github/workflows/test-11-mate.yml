@@ -163,6 +163,10 @@ jobs:
             grep -q '^en_US.UTF-8' /etc/locale.gen || echo 'en_US.UTF-8 UTF-8' >> /etc/locale.gen
             locale-gen
             echo 'LANG=ru_RU.UTF-8' > /etc/locale.conf
+            # Gentoo passes the language to X sessions via /etc/env.d (profile.env), not locale.conf
+            eselect locale set ru_RU.utf8
+            env-update
+            eselect locale show
             systemctl enable lightdm.service
             systemctl set-default graphical.target
             ls /usr/share/xsessions/
@@ -252,9 +256,10 @@ jobs:
           sleep 25
           echo "display-manager: $(systemctl is-active display-manager.service)"
           echo "ci processes: $(ps -u ci -o comm= | sort -u | tr '\n' ' ')"
+          echo "session LANG: $(tr '\0' '\n' < /proc/$(pgrep -u ci -x mate-session)/environ | grep '^LANG=')"
           echo "--- Xorg.0.log (errors, driver)"
           grep -E '\(EE\)|modeset|glamor|DRI|LoadModule' /var/log/Xorg.0.log | head -n 40
-          if pgrep -u ci -x mate-panel > /dev/null && pgrep -x Xorg > /dev/null; then
+          if pgrep -u ci -x mate-panel > /dev/null && pgrep -x 'X|Xorg' > /dev/null; then
             echo CI11-MATE-OK
           else
             journalctl -b -u display-manager.service --no-pager | tail -n 40
