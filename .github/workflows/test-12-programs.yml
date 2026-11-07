@@ -11,6 +11,10 @@ on:
         description: 'Rootfs artifact name'
         required: true
         default: 'rootfs-hp-mate'
+      kernel_run_id:
+        description: 'Optional: run ID of a Test 6 run whose kernel replaces the one in the rootfs'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -40,6 +44,15 @@ jobs:
           path: rootfs
 
       # same cache as Test 9: everything built here is reused by the next runs
+      - name: Download new kernel artifact (optional)
+        if: inputs.kernel_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: kernel-hp-custom
+          run-id: ${{ inputs.kernel_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: kernel
+
       - name: Restore Portage cache (binpkgs + distfiles)
         uses: actions/cache/restore@v4
         with:
@@ -83,6 +96,19 @@ jobs:
           rm -rf rootfs
           ls /mnt/gentoo/lib/modules
           df -h /mnt/gentoo
+
+      - name: Replace kernel and modules (optional)
+        if: inputs.kernel_run_id != ''
+        run: |
+          echo "old: $(ls /mnt/gentoo/lib/modules)"
+          sudo cp kernel/bzImage /mnt/gentoo/boot/vmlinuz
+          sudo rm -rf /mnt/gentoo/lib/modules/*
+          sudo cp -a kernel/lib/modules/. /mnt/gentoo/lib/modules/
+          sudo chown -R root:root /mnt/gentoo/lib/modules
+          sudo cp kernel/config-hp /mnt/gentoo/boot/config-hp
+          echo "new: $(ls /mnt/gentoo/lib/modules)"
+          for o in VETH BRIDGE OVERLAY_FS MEMCG NF_TABLES DRM_SIMPLEDRM; do grep -E "^CONFIG_$o=" kernel/config-hp || echo "MISSING CONFIG_$o"; done
+          rm -rf kernel
 
       - name: Prepare chroot mounts
         run: |
@@ -249,6 +275,8 @@ jobs:
           echo "--- services"
           for u in avahi-daemon bluetooth docker sshd; do echo "$u: $(systemctl is-active $u)"; done
           systemctl --failed --no-pager
+          docker info --format 'docker: {{.ServerVersion}}, storage {{.Driver}}, cgroup v{{.CgroupVersion}}' 2>&1 | head -n 3
+          systemctl is-active -q docker || { journalctl -b -u docker.service --no-pager | tail -n 25; miss=1; }
           if pgrep -u ci -x mate-panel > /dev/null && pgrep -x 'X|Xorg' > /dev/null && [ "$miss" = 0 ]; then
             echo CI12-MATE-OK
           else
