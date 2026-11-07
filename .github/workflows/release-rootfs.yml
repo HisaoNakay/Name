@@ -1,0 +1,64 @@
+name: Release - publish a rootfs artifact as a GitHub Release (direct download link)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID that holds the rootfs artifact (Test 13)'
+        required: true
+        default: '42409169048'
+      artifact_name:
+        description: 'Rootfs artifact name'
+        required: true
+        default: 'rootfs-hp-slim'
+      tag:
+        description: 'Release tag'
+        required: true
+        default: 'rootfs-2026-11-07'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Download rootfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: out
+
+      - name: Check sha256
+        working-directory: out
+        run: |
+          ls -l
+          sha256sum -c rootfs-slim.tar.zst.sha256
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          RUN: ${{ inputs.run_id }}
+        run: |
+          SIZE=$(du -h out/rootfs-slim.tar.zst | cut -f1)
+          SUM=$(cut -d' ' -f1 out/rootfs-slim.tar.zst.sha256)
+          cat > notes.md << EOF
+          Gentoo для HP Pavilion 15 (A10-5745M): MATE + программы из restore/pkglist.txt, ядро с Docker.
+          Урезанная сборка: без man/doc, переводы en/ru. Собрано в run $RUN.
+
+          - rootfs-slim.tar.zst: $SIZE
+          - sha256: \`$SUM\`
+
+          Проверка: \`sha256sum -c rootfs-slim.tar.zst.sha256\`
+          Распаковка: \`tar -xpf rootfs-slim.tar.zst -I 'zstd -d --long=27' --xattrs-include='*.*' --numeric-owner -C /mnt/gentoo\`
+          Дерево Portage в архив не входит: перед первым emerge выполнить \`emerge-webrsync\`.
+          EOF
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "Gentoo HP rootfs $TAG" --notes-file notes.md \
+            out/rootfs-slim.tar.zst out/rootfs-slim.tar.zst.sha256
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[]|"\(.name) \(.size) \(.url)"'
