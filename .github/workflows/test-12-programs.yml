@@ -207,6 +207,7 @@ jobs:
             --exclude='./var/db/repos/gentoo/*' \
             --exclude='./var/cache/distfiles/*' \
             --exclude='./var/cache/binpkgs/*' \
+            --exclude='./var/cache/binhost/*' \
             --exclude='./var/tmp/portage/*' \
             --exclude='./efi/*' \
             --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' --exclude='./run/*' \
