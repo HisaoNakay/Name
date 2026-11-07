@@ -143,6 +143,27 @@ jobs:
           ls $S/locale
           test -f $S/locale/locale.alias
 
+      # reinstalling noto from the binhost applies the Noto part of INSTALL_MASK; libmateweather stays (the clock applet needs it)
+      - name: Trim fonts (Noto) and MATE weather locations
+        run: |
+          S=/mnt/gentoo/usr/share
+          echo "noto before: $(sudo du -sh $S/fonts/noto | cut -f1), $(ls $S/fonts/noto | wc -l) files"
+          sudo chroot /mnt/gentoo /bin/bash -c "emerge --oneshot --quiet --getbinpkg --usepkg media-fonts/noto"
+          echo "noto after: $(sudo du -sh $S/fonts/noto | cut -f1), $(ls $S/fonts/noto | wc -l) files"
+          ls $S/fonts/noto
+          sudo test -f $S/fonts/noto/NotoSans-Regular.ttf || { echo "❌ NotoSans-Regular missing"; exit 1; }
+          if sudo test -e $S/fonts/noto/NotoSansArabic-Regular.ttf; then echo "❌ Noto mask not applied"; exit 1; fi
+          echo "--- libmateweather before: $(sudo du -sh $S/libmateweather | cut -f1)"
+          ls -lS $S/libmateweather | head -n 15
+          sudo find $S/libmateweather -maxdepth 1 -type f -name 'Locations.*.xml*' \
+            ! -name 'Locations.ru.*' ! -name 'Locations.en*' -delete
+          echo "--- libmateweather after: $(sudo du -sh $S/libmateweather | cut -f1)"
+          ls -lS $S/libmateweather | head -n 15
+          sudo chroot /mnt/gentoo fc-cache -s
+          sudo chroot /mnt/gentoo fc-match emoji
+          sudo chroot /mnt/gentoo fc-match 'sans-serif:lang=ja'
+          echo "- fonts: $(sudo du -sh $S/fonts | cut -f1), libmateweather: $(sudo du -sh $S/libmateweather | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
       # proves the INSTALL_MASK syntax (with -exceptions) works, so future emerges stay slim
       - name: Check INSTALL_MASK on a reinstall (sys-apps/sed)
         run: |
@@ -175,6 +196,7 @@ jobs:
             --exclude='./var/db/repos/gentoo/*' \
             --exclude='./var/cache/distfiles/*' \
             --exclude='./var/cache/binpkgs/*' \
+            --exclude='./var/cache/binhost/*' \
             --exclude='./var/tmp/portage/*' \
             --exclude='./efi/*' \
             --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' --exclude='./run/*' \
@@ -184,7 +206,7 @@ jobs:
           sha256sum rootfs-slim.tar.zst | tee rootfs-slim.tar.zst.sha256
           {
             echo "- after: on disk **$(sudo du -sxh --exclude=./var/db/repos /mnt/gentoo | cut -f1)**"
-            echo "- archive (zstd -19 --long): **$(du -h rootfs-slim.tar.zst | cut -f1)** ($(stat -c %s rootfs-slim.tar.zst) bytes); Test 12 archive (zstd -10) was 3.4 GB"
+            echo "- archive (zstd -19 --long): **$(du -h rootfs-slim.tar.zst | cut -f1)** ($(stat -c %s rootfs-slim.tar.zst) bytes); Test 12 archive (zstd -10) was 3.4 GB, first Test 13 2.35 GB"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload slim rootfs artifact
