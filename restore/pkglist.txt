@@ -77,7 +77,6 @@ dev-python/markdown2
 dev-python/numpy
 dev-python/rapidfuzz
 dev-python/reportlab
-app-editors/vscodium
 
 # KDE Plasma как на Arch. Нужен профиль default/linux/amd64/23.0/desktop/plasma/systemd
 [kde]
