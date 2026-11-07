@@ -9,3 +9,5 @@ sys-boot/grub mount
 dev-libs/libdbusmenu gtk3
 net-libs/ngtcp2 gnutls
 dev-qt/qttools designer
+# minizip нужен кому-то из [apps] (Test 10, 07.11)
+sys-libs/zlib minizip
