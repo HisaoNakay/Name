@@ -47,7 +47,7 @@ media-sound/picard
 media-gfx/flameshot
 x11-misc/copyq
 x11-misc/rofi
-app-editors/ghostwriter
+app-editors/retext  # редактор Markdown с предпросмотром; ghostwriter тянет QtWebEngine (сборка 6+ ч)
 app-text/qpdfview
 dev-db/sqlitebrowser
 dev-util/android-tools
