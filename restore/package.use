@@ -11,3 +11,8 @@ net-libs/ngtcp2 gnutls
 dev-qt/qttools designer
 # minizip нужен кому-то из [apps] (Test 10, 07.11)
 sys-libs/zlib minizip
+# Как на бинхосте Gentoo: иначе qtwebengine (движок Falkon/ghostwriter) собирается из исходников 4+ часа.
+# bindist = без проприетарных кодеков в браузере (H.264/AAC); YouTube идёт в VP9/AV1, это не мешает
+dev-qt/qtwebengine bindist
+# Как на бинхосте; к тому же openblas сам выберет оптимальный код под процессор
+sci-libs/openblas cpudetection
