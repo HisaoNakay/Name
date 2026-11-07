@@ -1,0 +1,351 @@
+name: Test 13 - slim rootfs (no man/doc, only en/ru translations, no VSCodium), size of the final archive, boot in QEMU/UEFI
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run ID of the successful Test 12 run (rootfs with programs and the Docker kernel)'
+        required: true
+        default: '42402186469'
+      artifact_name:
+        description: 'Rootfs artifact name'
+        required: true
+        default: 'rootfs-hp-full'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  slim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Free runner disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache /usr/local/share/boost
+          df -h /
+
+      - name: Checkout repo (make.conf, restore/)
+        uses: actions/checkout@v4
+
+      - name: Download rootfs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: rootfs
+
+      # same cache as Test 9: everything built here is reused by the next runs
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf parted dosfstools e2fsprogs zstd socat
+          mkdir -p binpkgs distfiles shots
+
+      - name: Create disk image (GPT, ESP 512MiB FAT32, root ext4)
+        run: |
+          truncate -s 30G disk.img
+          LOOP=$(sudo losetup -fP --show disk.img)
+          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
+          sudo parted -s "$LOOP" mklabel gpt \
+            mkpart ESP fat32 1MiB 513MiB set 1 esp on \
+            mkpart root ext4 513MiB 100%
+          sudo partprobe "$LOOP" || true
+          sudo udevadm settle || true
+          sudo mkfs.vfat -F32 "${LOOP}p1"
+          sudo mkfs.ext4 -F -L gentoo-root "${LOOP}p2"
+          sudo mkdir -p /mnt/gentoo
+          sudo mount "${LOOP}p2" /mnt/gentoo
+          sudo mkdir -p /mnt/gentoo/efi
+          sudo mount "${LOOP}p1" /mnt/gentoo/efi
+          lsblk -f "$LOOP"
+
+      - name: Extract rootfs onto the image
+        run: |
+          ls -lh rootfs/
+          sudo tar -xpf rootfs/rootfs.tar.zst -I zstd -C /mnt/gentoo --xattrs-include='*.*' --numeric-owner --exclude='./efi/*'
+          rm -rf rootfs
+          ls /mnt/gentoo/lib/modules
+          df -h /mnt/gentoo
+
+      - name: Prepare chroot mounts
+        run: |
+          sudo rm -f /mnt/gentoo/etc/resolv.conf
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/resolv.conf
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+          sudo mkdir -p /mnt/gentoo/var/cache/binpkgs /mnt/gentoo/var/cache/distfiles
+          sudo mount --bind "$PWD/binpkgs" /mnt/gentoo/var/cache/binpkgs
+          sudo mount --bind "$PWD/distfiles" /mnt/gentoo/var/cache/distfiles
+
+      # restore/package.* are the same files install.sh copies, so the image and a restored system agree
+      - name: make.conf, restore package.* files, desktop profile, Portage sync
+        run: |
+          sudo cp make.conf /mnt/gentoo/etc/portage/make.conf
+          sudo sed -i 's/^COMMON_FLAGS=.*/COMMON_FLAGS="-O2 -pipe"/' /mnt/gentoo/etc/portage/make.conf
+          printf '\n# CI: keep every built package and reuse it on the next run\nFEATURES="${FEATURES} buildpkg"\nEMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --usepkg"\n' | sudo tee -a /mnt/gentoo/etc/portage/make.conf > /dev/null
+          grep -E '^(USE|VIDEO_CARDS|INPUT_DEVICES|COMMON_FLAGS)=' /mnt/gentoo/etc/portage/make.conf
+          for t in package.use package.license package.accept_keywords; do
+            sudo mkdir -p "/mnt/gentoo/etc/portage/$t"
+            sudo cp "restore/$t" "/mnt/gentoo/etc/portage/$t/restore"
+          done
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            chown portage:portage /var/cache/binpkgs /var/cache/distfiles
+            emerge-webrsync --quiet
+            eselect profile set default/linux/amd64/23.0/desktop/systemd
+            eselect profile show
+          "
+
+      # same sections install.sh installs by default (base apps dev); mate is already in the rootfs
+      - name: Size before slimming
+        run: |
+          S=/mnt/gentoo/usr/share
+          echo "### Test 13: slim rootfs" >> "$GITHUB_STEP_SUMMARY"
+          echo "- before: on disk **$(sudo du -sxh --exclude=./var/db/repos /mnt/gentoo | cut -f1)**" >> "$GITHUB_STEP_SUMMARY"
+          for d in man info doc gtk-doc locale help; do echo "$d: $(sudo du -sh $S/$d 2>/dev/null | cut -f1)"; done | tee before.txt
+          { echo '<details><summary>usr/share before</summary>'; echo; echo '```'; cat before.txt; echo '```'; echo '</details>'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove VSCodium and what only it pulled in
+        run: |
+          set -o pipefail
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            emerge --deselect app-editors/vscodium
+            emerge --depclean
+          " 2>&1 | tee depclean.txt
+          {
+            echo '<details><summary>depclean</summary>'; echo; echo '```'
+            grep -E '^ [a-z]|selected:|Number removed' depclean.txt | head -n 60
+            echo '```'; echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+          ! sudo test -e /mnt/gentoo/usr/bin/codium
+
+      # same rules as INSTALL_MASK in make.conf, applied to files that are already installed
+      - name: Remove man/info/doc and translations other than en/ru
+        run: |
+          S=/mnt/gentoo/usr/share
+          sudo rm -rf $S/man $S/info $S/doc $S/gtk-doc
+          sudo find $S/locale -mindepth 1 -maxdepth 1 -type d \
+            ! -name en ! -name en_US ! -name en_GB ! -name ru ! -name ru_RU -exec rm -rf {} +
+          if [ -d $S/help ]; then
+            sudo find $S/help -mindepth 1 -maxdepth 1 -type d \
+              ! -name C ! -name ru ! -name en ! -name en_GB -exec rm -rf {} +
+            ls $S/help
+          fi
+          ls $S/locale
+          test -f $S/locale/locale.alias
+
+      # proves the INSTALL_MASK syntax (with -exceptions) works, so future emerges stay slim
+      - name: Check INSTALL_MASK on a reinstall (sys-apps/sed)
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "emerge --oneshot --quiet --getbinpkg --usepkg sys-apps/sed"
+          S=/mnt/gentoo/usr/share
+          if [ -e $S/man ]; then echo "❌ man came back"; exit 1; fi
+          sudo test -f $S/locale/ru/LC_MESSAGES/sed.mo || { echo "❌ ru translation of sed missing"; exit 1; }
+          if sudo test -e $S/locale/de/LC_MESSAGES/sed.mo; then echo "❌ de translation installed"; exit 1; fi
+          echo "✅ INSTALL_MASK works: no man, ru kept, de dropped"
+
+      - name: Release chroot mounts, restore resolv.conf symlink
+        if: always()
+        run: |
+          for m in var/cache/binpkgs var/cache/distfiles dev sys proc; do
+            sudo umount -R "/mnt/gentoo/$m" || sudo umount -l -R "/mnt/gentoo/$m" || true
+          done
+          sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /mnt/gentoo/etc/resolv.conf
+
+      - name: Biggest directories (what else could go)
+        run: |
+          sudo du -xh -d3 --exclude=./var/db/repos /mnt/gentoo/usr /mnt/gentoo/opt /mnt/gentoo/var 2>/dev/null | sort -h | tail -n 40 | tee big.txt
+          { echo '<details><summary>biggest dirs</summary>'; echo; echo '```'; cat big.txt; echo '```'; echo '</details>'; } >> "$GITHUB_STEP_SUMMARY"
+
+      # -19 --long: slowest to pack, smallest to download; unpacking stays fast
+      - name: Save slim rootfs as tar.zst (max compression)
+        run: |
+          sync
+          time sudo tar --xattrs --xattrs-include='*.*' --numeric-owner -I 'zstd -T0 -19 --long=27' \
+            -cpf rootfs-slim.tar.zst -C /mnt/gentoo \
+            --exclude='./var/db/repos/gentoo/*' \
+            --exclude='./var/cache/distfiles/*' \
+            --exclude='./var/cache/binpkgs/*' \
+            --exclude='./var/tmp/portage/*' \
+            --exclude='./efi/*' \
+            --exclude='./proc/*' --exclude='./sys/*' --exclude='./dev/*' --exclude='./run/*' \
+            .
+          sudo chown "$USER" rootfs-slim.tar.zst
+          ls -l rootfs-slim.tar.zst
+          sha256sum rootfs-slim.tar.zst | tee rootfs-slim.tar.zst.sha256
+          {
+            echo "- after: on disk **$(sudo du -sxh --exclude=./var/db/repos /mnt/gentoo | cut -f1)**"
+            echo "- archive (zstd -19 --long): **$(du -h rootfs-slim.tar.zst | cut -f1)** ($(stat -c %s rootfs-slim.tar.zst) bytes); Test 12 archive (zstd -10) was 3.4 GB"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload slim rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rootfs-hp-slim
+          path: |
+            rootfs-slim.tar.zst
+            rootfs-slim.tar.zst.sha256
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Regenerate fstab, reinstall GRUB, write grub.cfg
+        run: |
+          rm -f rootfs.tar.zst rootfs-slim.tar.zst
+          ROOT_UUID=$(sudo blkid -s UUID -o value "${LOOP}p2")
+          ESP_UUID=$(sudo blkid -s UUID -o value "${LOOP}p1")
+          ROOT_PARTUUID=$(sudo blkid -s PARTUUID -o value "${LOOP}p2")
+          printf 'UUID=%s / ext4 defaults 0 1\nUUID=%s /efi vfat umask=0077 0 2\n' "$ROOT_UUID" "$ESP_UUID" | sudo tee /mnt/gentoo/etc/fstab
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo chroot /mnt/gentoo /bin/bash -c "grub-install --target=x86_64-efi --efi-directory=/efi --boot-directory=/boot --removable --no-nvram"
+          sudo umount -R /mnt/gentoo/dev /mnt/gentoo/proc /mnt/gentoo/sys || sudo umount -l -R /mnt/gentoo/dev /mnt/gentoo/proc /mnt/gentoo/sys || true
+          {
+            echo 'set timeout=1'
+            echo 'menuentry "Gentoo (HP custom kernel)" {'
+            echo "  search --no-floppy --fs-uuid --set=root $ROOT_UUID"
+            echo "  linux /boot/vmlinuz root=PARTUUID=$ROOT_PARTUUID ro console=tty0 console=ttyS0,115200"
+            echo '}'
+          } | sudo tee /mnt/gentoo/boot/grub/grub.cfg > /dev/null
+
+      # not in the saved rootfs: a test user with autologin and a check that waits for the MATE panel
+      - name: Add CI-only test user, autologin and desktop check
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            groupadd -f autologin
+            useradd -m -G video,audio,input,autologin ci
+          "
+          sudo mkdir -p /mnt/gentoo/etc/lightdm/lightdm.conf.d
+          printf '[Seat:*]\nautologin-user=ci\nautologin-session=mate\n' | sudo tee /mnt/gentoo/etc/lightdm/lightdm.conf.d/50-ci-autologin.conf
+          sudo tee /mnt/gentoo/usr/local/bin/ci-check.sh > /dev/null << 'SH_EOF'
+          #!/bin/sh
+          for i in $(seq 1 600); do
+            pgrep -u ci -x mate-panel > /dev/null && break
+            sleep 1
+          done
+          sleep 25
+          echo "display-manager: $(systemctl is-active display-manager.service)"
+          echo "ci processes: $(ps -u ci -o comm= | sort -u | tr '\n' ' ')"
+          echo "session LANG: $(tr '\0' '\n' < /proc/$(pgrep -u ci -x mate-session)/environ | grep '^LANG=')"
+          echo "--- Xorg.0.log (errors, driver)"
+          grep -E '\(EE\)|modeset|glamor|DRI|LoadModule' /var/log/Xorg.0.log | head -n 40
+          echo "--- programs"
+          miss=0
+          for b in fish git gh fastfetch htop mpv vlc strawberry picard flameshot copyq rofi node python3 docker adb flatpak sshfs; do
+            command -v "$b" > /dev/null || { echo "MISSING: $b"; miss=1; }
+          done
+          fastfetch --pipe 2> /dev/null | head -n 20
+          echo "--- services"
+          for u in avahi-daemon bluetooth docker sshd; do echo "$u: $(systemctl is-active $u)"; done
+          systemctl --failed --no-pager
+          docker info --format 'docker: {{.ServerVersion}}, storage {{.Driver}}, cgroup v{{.CgroupVersion}}' 2>&1 | head -n 3
+          systemctl is-active -q docker || { journalctl -b -u docker.service --no-pager | tail -n 25; miss=1; }
+          if pgrep -u ci -x mate-panel > /dev/null && pgrep -x 'X|Xorg' > /dev/null && [ "$miss" = 0 ]; then
+            echo CI13-MATE-OK
+          else
+            journalctl -b -u display-manager.service --no-pager | tail -n 40
+            tail -n 40 /var/log/lightdm/lightdm.log
+            echo CI13-MATE-FAIL
+          fi
+          SH_EOF
+          sudo chmod +x /mnt/gentoo/usr/local/bin/ci-check.sh
+          sudo tee /mnt/gentoo/etc/systemd/system/ci-check.service > /dev/null << 'UNIT_EOF'
+          [Unit]
+          Description=CI check (Test 13, slim system + MATE desktop)
+          After=display-manager.service
+
+          [Service]
+          Type=oneshot
+          TimeoutStartSec=900
+          StandardOutput=journal+console
+          StandardError=journal+console
+          ExecStart=/bin/sh /usr/local/bin/ci-check.sh
+
+          [Install]
+          WantedBy=graphical.target
+          UNIT_EOF
+          sudo systemctl --root=/mnt/gentoo enable ci-check.service
+
+      - name: Unmount and detach image
+        run: |
+          sync
+          sudo umount -R /mnt/gentoo || sudo umount -l -R /mnt/gentoo
+          sudo losetup -d "$LOOP"
+
+      - name: Enable KVM if the runner has it
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            echo "ACCEL=-accel kvm -cpu host" >> "$GITHUB_ENV"
+          else
+            echo "ACCEL=-accel tcg" >> "$GITHUB_ENV"
+          fi
+
+      - name: Boot image in QEMU (UEFI, virtio-gpu), wait for MATE, take screenshots
+        run: |
+          CODE=/usr/share/OVMF/OVMF_CODE_4M.fd
+          VARS_SRC=/usr/share/OVMF/OVMF_VARS_4M.fd
+          cp "$VARS_SRC" /tmp/OVMF_VARS.fd
+          shot() { echo "screendump $PWD/shots/$1.png -f png" | socat - UNIX-CONNECT:/tmp/qmon > /dev/null 2>&1 || true; }
+
+          : > boot.log
+          # shellcheck disable=SC2086
+          qemu-system-x86_64 $ACCEL \
+            -machine q35 \
+            -drive if=pflash,format=raw,readonly=on,file="$CODE" \
+            -drive if=pflash,format=raw,file=/tmp/OVMF_VARS.fd \
+            -m 4096 -smp 4 \
+            -device ich9-ahci,id=ahci \
+            -drive file=disk.img,format=raw,if=none,id=d0 \
+            -device ide-hd,drive=d0,bus=ahci.0 \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 \
+            -device virtio-vga \
+            -device qemu-xhci -device usb-tablet -device usb-kbd \
+            -display none -serial file:boot.log -monitor unix:/tmp/qmon,server,nowait -no-reboot &
+          QPID=$!
+
+          for i in $(seq 1 1200); do
+            grep -qE 'CI13-MATE-(OK|FAIL)' boot.log && break
+            kill -0 "$QPID" 2>/dev/null || break
+            [ "$i" = 120 ] && shot 01-boot-2min
+            sleep 1
+          done
+          sleep 3
+          shot 02-desktop
+          kill "$QPID" 2>/dev/null || true
+          wait "$QPID" 2>/dev/null || true
+
+          echo "----- boot.log (tail) -----"
+          tail -n 150 boot.log
+          echo "-----"
+          ls -l shots/
+          if grep -q 'CI13-MATE-OK' boot.log; then
+            echo "✅ MATE desktop is up (Xorg + LightDM autologin + mate-panel)"
+          else
+            echo "❌ MATE did not come up - see log and screenshots"
+            exit 1
+          fi
+
+      - name: Upload screenshots and boot log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: slim-screenshots
+          path: |
+            shots/
+            boot.log
+          retention-days: 14
+          if-no-files-found: ignore
