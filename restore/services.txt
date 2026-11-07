@@ -1,0 +1,5 @@
+# Службы systemd (аналог ../services.txt). NetworkManager не нужен: сеть = networkd + resolved + iwd из сборки.
+avahi-daemon.service
+bluetooth.service
+docker.service
+sshd.service
