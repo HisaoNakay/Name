@@ -155,8 +155,7 @@ jobs:
           if sudo test -e $S/fonts/noto/NotoSansArabic-Regular.ttf; then echo "❌ Noto mask not applied"; exit 1; fi
           echo "--- libmateweather before: $(sudo du -sh $S/libmateweather | cut -f1)"
           ls -lS $S/libmateweather | head -n 15
-          sudo find $S/libmateweather -maxdepth 1 -type f -name 'Locations.*.xml*' \
-            ! -name 'Locations.ru.*' ! -name 'Locations.en*' -delete
+          sudo find $S/libmateweather -maxdepth 1 -type f -name 'Locations.*.xml*' ! -name 'Locations.ru.xml' -delete
           echo "--- libmateweather after: $(sudo du -sh $S/libmateweather | cut -f1)"
           ls -lS $S/libmateweather | head -n 15
           sudo chroot /mnt/gentoo fc-cache -s
