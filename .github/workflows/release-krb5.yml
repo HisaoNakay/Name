@@ -1,0 +1,92 @@
+name: Release - mit-krb5 binpkgs for Throne (offline install in step 3)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag with rootfs-slim.tar.zst'
+        required: true
+        default: 'rootfs-2026-11-07'
+
+permissions:
+  contents: write
+
+jobs:
+  krb5:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Download and unpack rootfs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ inputs.tag }}" -R "$GITHUB_REPOSITORY" -p 'rootfs-slim.tar.zst*'
+          sha256sum -c rootfs-slim.tar.zst.sha256
+          sudo mkdir -p /mnt/gentoo
+          sudo tar -xpf rootfs-slim.tar.zst -I 'zstd -d --long=27' --xattrs-include='*.*' --numeric-owner -C /mnt/gentoo
+          rm rootfs-slim.tar.zst
+
+      - name: Prepare chroot mounts
+        run: |
+          sudo rm -f /mnt/gentoo/etc/resolv.conf
+          sudo cp --dereference /etc/resolv.conf /mnt/gentoo/etc/resolv.conf
+          sudo mount --types proc /proc /mnt/gentoo/proc
+          sudo mount --rbind /sys /mnt/gentoo/sys
+          sudo mount --make-rslave /mnt/gentoo/sys
+          sudo mount --rbind /dev /mnt/gentoo/dev
+          sudo mount --make-rslave /mnt/gentoo/dev
+
+      # the rootfs's own make.conf and profile, so the packages match the installed system
+      - name: Install mit-krb5 and pack it with quickpkg
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "cd /var/db/pkg && ls -d */* | sort > /root/before.txt"
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            emerge-webrsync --quiet
+            eselect profile show
+            emerge --oneshot --quiet-build --getbinpkg --usepkg app-crypt/mit-krb5
+          "
+          # packages that were not in the release: mit-krb5 and whatever it pulled in
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            cd /var/db/pkg
+            ls -d */* | sort | comm -13 /root/before.txt - | sed 's|^|=|' > /root/new.txt
+            cat /root/new.txt
+            grep -q 'app-crypt/mit-krb5' /root/new.txt
+            mkdir -p /var/cache/binpkgs-krb5
+            PKGDIR=/var/cache/binpkgs-krb5 quickpkg --include-config=y \$(cat /root/new.txt)
+          "
+          sudo tar -cf krb5-binpkgs.tar -C /mnt/gentoo/var/cache/binpkgs-krb5 .
+          sudo chown "$USER" krb5-binpkgs.tar
+          tar -tvf krb5-binpkgs.tar
+          sha256sum krb5-binpkgs.tar | tee krb5-binpkgs.tar.sha256
+
+      # back to the state of the release, then exactly the guide's step: no Portage tree, no network
+      - name: Test the offline install from the guide
+        run: |
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            emerge --unmerge --quiet \$(cat /root/new.txt)
+            ! test -e /usr/lib64/libgssapi_krb5.so.2
+            rm -rf /var/db/repos/gentoo /var/cache/binpkgs-krb5
+          "
+          sudo rm -f /mnt/gentoo/etc/resolv.conf
+          sudo cp krb5-binpkgs.tar /mnt/gentoo/root/
+          sudo unshare --net chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            mkdir -p /var/cache/binpkgs-krb5
+            tar -xf /root/krb5-binpkgs.tar -C /var/cache/binpkgs-krb5
+            PKGDIR=/var/cache/binpkgs-krb5 emerge --usepkgonly --oneshot app-crypt/mit-krb5
+            ldd /usr/lib64/libgssapi_krb5.so.2
+            ! ldd /usr/lib64/libgssapi_krb5.so.2 | grep 'not found'
+          "
+          echo "✅ offline install works" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber krb5-binpkgs.tar krb5-binpkgs.tar.sha256
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[]|"\(.name) \(.size)"'
