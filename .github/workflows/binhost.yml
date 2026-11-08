@@ -1,0 +1,172 @@
+name: Binhost - build packages missing on the Gentoo binhost
+
+# Собирает пакеты, которых нет готовыми у Gentoo, в тех же условиях, что на HP
+# (rootfs из Release + /etc/portage, профиль и дата дерева из binhost/),
+# подписывает своим ключом и выкладывает в Release `binhost`.
+# На HP: binhost/trust-key.sh + /etc/portage/binrepos.conf/hisao.conf.
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Packages, space separated (e.g. x11-misc/qt6ct)'
+        required: true
+      rootfs_tag:
+        description: 'Release tag with rootfs-slim.tar.zst'
+        required: true
+        default: 'rootfs-2026-11-07'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: binhost
+  cancel-in-progress: false
+
+# явный bash = -eo pipefail: ошибка emerge перед `| tee` роняет шаг
+defaults:
+  run:
+    shell: bash
+
+env:
+  R: /mnt/gentoo
+  TAG: binhost
+  SYNC_URI: https://github.com/${{ github.repository }}/releases/download/binhost
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download and unpack rootfs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ inputs.rootfs_tag }}" -R "$GITHUB_REPOSITORY" -p 'rootfs-slim.tar.zst*'
+          sha256sum -c rootfs-slim.tar.zst.sha256
+          sudo mkdir -p "$R"
+          sudo tar -xpf rootfs-slim.tar.zst -I 'zstd -d --long=27' --xattrs-include='*.*' --numeric-owner -C "$R"
+          rm rootfs-slim.tar.zst
+
+      - name: Prepare chroot mounts
+        run: |
+          sudo rm -f "$R/etc/resolv.conf"
+          sudo cp --dereference /etc/resolv.conf "$R/etc/resolv.conf"
+          sudo mount --types proc /proc "$R/proc"
+          sudo mount --rbind /sys "$R/sys"
+          sudo mount --make-rslave "$R/sys"
+          sudo mount --rbind /dev "$R/dev"
+          sudo mount --make-rslave "$R/dev"
+
+      # дерево Portage той же даты, что на HP: иначе версии зависимостей разъедутся
+      - name: Portage tree and settings as on HP
+        run: |
+          want="$(cat binhost/portage-timestamp)"
+          d0=$(date -u -d "$want" +%s)
+          ok=
+          for shift in 0 -1 1 -2; do
+            d=$(date -u -d "@$((d0 + shift * 86400))" +%Y%m%d)
+            sudo rm -rf "$R/var/db/repos/gentoo"
+            sudo chroot "$R" emerge-webrsync --quiet --revert="$d" || continue
+            got="$(cat "$R/var/db/repos/gentoo/metadata/timestamp.chk")"
+            echo "snapshot $d: $got"
+            [ "$got" = "$want" ] && { ok=$d; break; }
+          done
+          [ -n "$ok" ] || { echo "::error::нет снимка дерева с датой $want"; exit 1; }
+          echo "Дерево Portage: снимок $ok ($want)" >> "$GITHUB_STEP_SUMMARY"
+
+          for f in package.use package.accept_keywords package.license package.mask; do
+            sudo rm -rf "$R/etc/portage/$f"
+          done
+          sudo cp -r binhost/portage/. "$R/etc/portage/"
+          sudo chroot "$R" eselect profile set "$(cat binhost/profile)"
+          sudo chroot "$R" eselect profile show
+
+      - name: Signing key
+        env:
+          KEY: ${{ secrets.BINHOST_GPG_KEY }}
+        run: |
+          FPR=$(gpg --batch --show-keys --with-colons binhost/binhost-key.asc | awk -F: '/^fpr/{print $10; exit}')
+          printf '%s\n' "$KEY" | sudo chroot "$R" /bin/bash -c '
+            mkdir -m 700 -p /root/binhost-gpg
+            gpg --homedir /root/binhost-gpg --batch --quiet --import'
+          sudo chroot "$R" gpg --homedir /root/binhost-gpg --batch --list-secret-keys "$FPR" >/dev/null
+          sudo tee -a "$R/etc/portage/make.conf" >/dev/null <<EOF
+
+          # CI binhost: sign every package built here
+          FEATURES="\${FEATURES} binpkg-signing"
+          BINPKG_FORMAT="gpkg"
+          BINPKG_GPG_SIGNING_GPG_HOME="/root/binhost-gpg"
+          BINPKG_GPG_SIGNING_KEY="0x$FPR"
+          EOF
+          # the same trust setup as on HP, used by the install test below
+          sudo cp -r binhost "$R/root/binhost"
+          sudo chroot "$R" bash /root/binhost/trust-key.sh
+
+      - name: Build
+        env:
+          PKGS: ${{ inputs.packages }}
+        run: |
+          sudo rm -rf "$R/var/cache/binpkgs" && sudo mkdir -p "$R/var/cache/binpkgs"
+          # готовое — с бинхоста Gentoo; собирается только то, чего там нет
+          sudo chroot "$R" emerge --getbinpkg --usepkg --buildpkg --oneshot --quiet-build \
+            --with-bdeps=y --verbose $PKGS
+          sudo chroot "$R" emaint binhost --fix
+          echo "Собрано здесь:"
+          sudo find "$R/var/cache/binpkgs" -name '*.gpkg.tar' -printf '%P  %s\n' | tee built.txt
+          if [ ! -s built.txt ]; then
+            echo "::notice::Всё уже есть на бинхосте Gentoo, выкладывать нечего"
+            echo "NOTHING=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Merge into the binhost index
+        if: env.NOTHING != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --latest=false --title "Binhost (HP)" \
+                 --notes "Готовые пакеты Gentoo для HP, подписаны ключом binhost/binhost-key.asc. Индекс: Packages."
+          old=-
+          if gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p Packages -O old-Packages 2>/dev/null; then old=old-Packages; fi
+          sudo python3 binhost/merge-index.py "$R/var/cache/binpkgs" "$old" upload "$GITHUB_RUN_ID"
+          sudo chown -R "$USER" upload
+          cat upload/Packages
+
+      - name: Upload
+        if: env.NOTHING != '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # пакеты сначала, индекс последним: пока он старый, никто не видит недокачанного
+          ls upload | grep -v '^Packages$' | sed 's|^|upload/|' | xargs gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber
+          cp binhost/binhost-key.asc upload/
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber upload/Packages upload/binhost-key.asc
+          # файлы, на которые индекс больше не ссылается
+          keep=$(awk -F': ' '$1=="PATH"{print $2}' upload/Packages; echo Packages; echo binhost-key.asc)
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | while read -r a; do
+            grep -qxF "$a" <<<"$keep" || { echo "удаляю $a"; gh release delete-asset "$TAG" "$a" -R "$GITHUB_REPOSITORY" -y; }
+          done
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[]|"\(.name) \(.size)"' | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # как будет на HP: только из Release, с проверкой подписи
+      - name: Test install from the binhost like on HP
+        if: env.NOTHING != '1'
+        env:
+          PKGS: ${{ inputs.packages }}
+        run: |
+          sudo chroot "$R" emerge --unmerge --quiet $PKGS
+          sudo rm -rf "$R/var/cache/binpkgs"/*
+          sudo tee "$R/etc/portage/binrepos.conf/hisao.conf" >/dev/null <<EOF
+          [hisao]
+          priority = 2
+          sync-uri = $SYNC_URI
+          location = /var/cache/binhost/hisao
+          verify-signature = true
+          EOF
+          sudo chroot "$R" emerge --getbinpkgonly --oneshot --verbose $PKGS 2>&1 | tee install.log
+          grep -q 'binary' install.log
+          echo "✅ установка из binhost с проверкой подписи прошла: $PKGS" >> "$GITHUB_STEP_SUMMARY"

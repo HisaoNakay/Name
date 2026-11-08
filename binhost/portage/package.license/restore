@@ -1,0 +1,2 @@
+# Лицензии сверх "-* @FREE" из make.conf. install.sh кладёт в /etc/portage/package.license/restore
+media-fonts/noto-emoji OFL-1.1
