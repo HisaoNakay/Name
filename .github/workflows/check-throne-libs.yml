@@ -1,0 +1,65 @@
+name: Check - system libraries for Throne in the rootfs release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag with rootfs-slim.tar.zst'
+        required: true
+        default: 'rootfs-2026-11-07'
+
+permissions:
+  contents: read
+
+jobs:
+  libs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download rootfs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ inputs.tag }}" -R "$GITHUB_REPOSITORY" -p 'rootfs-slim.tar.zst*'
+          sha256sum -c rootfs-slim.tar.zst.sha256
+
+      - name: Unpack
+        run: |
+          sudo mkdir -p /mnt/r
+          sudo tar -xpf rootfs-slim.tar.zst -I 'zstd -d --long=27' --numeric-owner -C /mnt/r
+          rm rootfs-slim.tar.zst
+
+      # NEEDED of Throne, ThroneCore, bundled Qt and the xcb platform plugin (from the laptop copy),
+      # plus libssl/libcrypto: Qt's TLS backend loads them with dlopen, so they are not in NEEDED
+      - name: Check libraries
+        run: |
+          R=/mnt/r
+          CRIT="ld-linux-x86-64.so.2 libEGL.so.1 libGL.so.1 libGLX.so.0 libOpenGL.so.0 libX11-xcb.so.1 libX11.so.6
+            libbrotlidec.so.1 libc.so.6 libdbus-1.so.3 libdl.so.2 libfontconfig.so.1 libfreetype.so.6 libgcc_s.so.1
+            libglib-2.0.so.0 libgssapi_krb5.so.2 libgthread-2.0.so.0 libm.so.6 libpthread.so.0 libresolv.so.2 librt.so.1
+            libstdc++.so.6 libwayland-client.so.0 libwayland-cursor.so.0 libxcb-icccm.so.4 libxcb-image.so.0
+            libxcb-keysyms.so.1 libxcb-randr.so.0 libxcb-render-util.so.0 libxcb-render.so.0 libxcb-shape.so.0
+            libxcb-shm.so.0 libxcb-sync.so.1 libxcb-xfixes.so.0 libxcb-xkb.so.1 libxcb.so.1 libxkbcommon-x11.so.0
+            libxkbcommon.so.0 libz.so.1 libzstd.so.1 libssl.so.3 libcrypto.so.3"
+          # only the GTK3 platform theme plugin needs these; without them Throne starts with the plain Qt look
+          OPT="libatk-1.0.so.0 libcairo-gobject.so.2 libcairo.so.2 libgdk-3.so.0 libgdk_pixbuf-2.0.so.0 libgio-2.0.so.0
+            libgobject-2.0.so.0 libgtk-3.so.0 libharfbuzz.so.0 libpango-1.0.so.0 libpangocairo-1.0.so.0"
+          DIRS="$R/lib64 $R/usr/lib64 $R/lib $R/usr/lib"
+          check() {
+            miss=""
+            for so in $2; do
+              p=$(sudo find $DIRS -maxdepth 1 -name "$so" 2>/dev/null | head -n1)
+              if [ -n "$p" ]; then
+                own=$(sudo grep -l " ${p#$R}\( \|$\)" $R/var/db/pkg/*/*/CONTENTS 2>/dev/null | head -n1 | cut -d/ -f5,6)
+                echo "  ✅ $so  ${own:-?}"
+              else
+                echo "  ❌ $so"; miss="$miss $so"
+              fi
+            done
+            echo "$1 missing:${miss:- none}" >> "$GITHUB_STEP_SUMMARY"
+          }
+          echo "== required"; check "Required" "$CRIT"
+          echo "== GTK theme plugin"; check "GTK theme plugin" "$OPT"
+          echo "== krb5 packages:"; ls $R/var/db/pkg/app-crypt/ | grep -iE 'krb5|heimdal' || echo "  none"
+          cat "$GITHUB_STEP_SUMMARY"
