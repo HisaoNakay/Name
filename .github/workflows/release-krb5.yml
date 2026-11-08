@@ -1,4 +1,4 @@
-name: Release - mit-krb5 binpkgs for Throne (offline install in step 3)
+name: Release - mit-krb5 files for Throne (offline unpack in step 3)
 
 on:
   workflow_dispatch:
@@ -38,7 +38,7 @@ jobs:
           sudo mount --make-rslave /mnt/gentoo/dev
 
       # the rootfs's own make.conf and profile, so the packages match the installed system
-      - name: Install mit-krb5 and pack it with quickpkg
+      - name: Install mit-krb5 and pack its files
         run: |
           sudo chroot /mnt/gentoo /bin/bash -c "cd /var/db/pkg && ls -d */* | sort > /root/before.txt"
           sudo chroot /mnt/gentoo /bin/bash -c "
@@ -47,46 +47,51 @@ jobs:
             eselect profile show
             emerge --oneshot --quiet-build --getbinpkg --usepkg app-crypt/mit-krb5
           "
-          # packages that were not in the release: mit-krb5 and whatever it pulled in
+          # runtime packages that were not in the release (yasm is build-only and stays out)
           sudo chroot /mnt/gentoo /bin/bash -c "
             set -e
             cd /var/db/pkg
-            ls -d */* | sort | comm -13 /root/before.txt - | sed 's|^|=|' > /root/new.txt
-            cat /root/new.txt
-            grep -q 'app-crypt/mit-krb5' /root/new.txt
-            mkdir -p /var/cache/binpkgs-krb5
-            PKGDIR=/var/cache/binpkgs-krb5 quickpkg --include-config=y \$(cat /root/new.txt)
+            ls -d */* | sort | comm -13 /root/before.txt - | grep -v '^dev-lang/yasm' | tee /root/new.txt
+            grep -q '^app-crypt/mit-krb5' /root/new.txt
+            for p in \$(cat /root/new.txt); do awk '\$1==\"obj\" || \$1==\"sym\" {print \$2}' \$p/CONTENTS; done | sed 's|^/||' > /root/files.txt
+            wc -l /root/files.txt
+            tar -C / --numeric-owner -cf - -T /root/files.txt | zstd -19 -q > /root/krb5-files.tar.zst
           "
-          sudo tar -cf krb5-binpkgs.tar -C /mnt/gentoo/var/cache/binpkgs-krb5 .
-          sudo chown "$USER" krb5-binpkgs.tar
-          tar -tvf krb5-binpkgs.tar
-          sha256sum krb5-binpkgs.tar | tee krb5-binpkgs.tar.sha256
+          sudo mv /mnt/gentoo/root/krb5-files.tar.zst .
+          sudo chown "$USER" krb5-files.tar.zst
+          zstd -dc krb5-files.tar.zst | tar -t | grep -E 'libgssapi|libverto|libev\.' 
+          ls -l krb5-files.tar.zst
+          sha256sum krb5-files.tar.zst | tee krb5-files.tar.zst.sha256
 
-      # back to the state of the release, then exactly the guide's step: no Portage tree, no network
-      - name: Test the offline install from the guide
+      # back to the state of the release, then the guide's step 3: no Portage tree, no network
+      - name: Test step 3 (offline unpack) and step 6 (emerge over it)
         run: |
           sudo chroot /mnt/gentoo /bin/bash -c "
             set -e
-            emerge --unmerge --quiet \$(cat /root/new.txt)
+            emerge --unmerge --quiet \$(sed 's/^/=/' /root/new.txt)
             ! test -e /usr/lib64/libgssapi_krb5.so.2
-            rm -rf /var/db/repos/gentoo /var/cache/binpkgs-krb5
           "
-          sudo rm -f /mnt/gentoo/etc/resolv.conf
-          sudo cp krb5-binpkgs.tar /mnt/gentoo/root/
+          sudo mv /mnt/gentoo/var/db/repos/gentoo repo-saved
+          sudo cp krb5-files.tar.zst /mnt/gentoo/root/
           sudo unshare --net chroot /mnt/gentoo /bin/bash -c "
             set -e
-            mkdir -p /var/cache/binpkgs-krb5
-            tar -xf /root/krb5-binpkgs.tar -C /var/cache/binpkgs-krb5
-            PKGDIR=/var/cache/binpkgs-krb5 emerge --usepkgonly --oneshot app-crypt/mit-krb5
+            tar -xpf /root/krb5-files.tar.zst -I zstd -C /
             ldd /usr/lib64/libgssapi_krb5.so.2
             ! ldd /usr/lib64/libgssapi_krb5.so.2 | grep 'not found'
           "
-          echo "✅ offline install works" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ step 3: offline unpack works" >> "$GITHUB_STEP_SUMMARY"
+          sudo mv repo-saved /mnt/gentoo/var/db/repos/gentoo
+          sudo chroot /mnt/gentoo /bin/bash -c "
+            set -e
+            emerge --oneshot --quiet-build --getbinpkg --usepkg app-crypt/mit-krb5
+            qfile /usr/lib64/libgssapi_krb5.so.2 2>/dev/null || grep -l libgssapi_krb5 /var/db/pkg/app-crypt/mit-krb5-*/CONTENTS
+          "
+          echo "✅ step 6: emerge over the unpacked files works" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
         run: |
-          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber krb5-binpkgs.tar krb5-binpkgs.tar.sha256
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber krb5-files.tar.zst krb5-files.tar.zst.sha256
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[]|"\(.name) \(.size)"'
