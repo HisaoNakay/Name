@@ -7,6 +7,7 @@ rm -rf portage && mkdir portage
 for f in make.conf package.use package.accept_keywords package.license package.mask; do
   [ -e "/etc/portage/$f" ] && cp -r "/etc/portage/$f" portage/
 done
+cp /var/lib/portage/world world   # для сборки с update_world: тот же набор пакетов, что на HP
 cp /var/db/repos/gentoo/metadata/timestamp.chk portage-timestamp
 readlink /etc/portage/make.profile | sed 's|.*/profiles/||' > profile
 echo "дерево: $(cat portage-timestamp), профиль: $(cat profile)"

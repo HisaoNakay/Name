@@ -15,6 +15,10 @@ on:
         description: 'Release tag with rootfs-slim.tar.zst'
         required: true
         default: 'rootfs-2026-11-07'
+      update_world:
+        description: 'Also emerge -uDN @world (world from binhost/world), e.g. when packages pull a Qt upgrade'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -85,6 +89,10 @@ jobs:
           sudo cp -r binhost/portage/. "$R/etc/portage/"
           sudo chroot "$R" eselect profile set "$(cat binhost/profile)"
           sudo chroot "$R" eselect profile show
+          if [ "${{ inputs.update_world }}" = true ]; then
+            sudo cp binhost/world "$R/var/lib/portage/world"
+            echo "world: $(wc -l < binhost/world) записей с HP" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Signing key
         env:
@@ -113,8 +121,14 @@ jobs:
         run: |
           sudo rm -rf "$R/var/cache/binpkgs" && sudo mkdir -p "$R/var/cache/binpkgs"
           # готовое — с бинхоста Gentoo; собирается только то, чего там нет
-          sudo chroot "$R" emerge --getbinpkg --usepkg --buildpkg --oneshot --quiet-build \
-            --with-bdeps=y --verbose $PKGS
+          if [ "${{ inputs.update_world }}" = true ]; then
+            # как на HP: emerge -uDN @world + новые пакеты одним заходом
+            sudo chroot "$R" emerge --getbinpkg --usepkg --buildpkg --quiet-build \
+              --update --deep --newuse --with-bdeps=n --verbose @world $PKGS
+          else
+            sudo chroot "$R" emerge --getbinpkg --usepkg --buildpkg --oneshot --quiet-build \
+              --with-bdeps=y --verbose $PKGS
+          fi
           sudo chroot "$R" emaint binhost --fix
           echo "Собрано здесь:"
           sudo find "$R/var/cache/binpkgs" -name '*.gpkg.tar' -printf '%P  %s\n' | tee built.txt
@@ -159,7 +173,6 @@ jobs:
         env:
           PKGS: ${{ inputs.packages }}
         run: |
-          sudo chroot "$R" emerge --unmerge --quiet $PKGS
           sudo rm -rf "$R/var/cache/binpkgs"/*
           sudo tee "$R/etc/portage/binrepos.conf/hisao.conf" >/dev/null <<EOF
           [hisao]
@@ -168,6 +181,14 @@ jobs:
           location = /var/cache/binhost/hisao
           verify-signature = true
           EOF
-          sudo chroot "$R" emerge --getbinpkgonly --oneshot --verbose $PKGS 2>&1 | tee install.log
+          if [ "${{ inputs.update_world }}" = true ]; then
+            # всё собранное здесь переставить из Release (с проверкой подписи)
+            # built.txt: cat/pn/pf-BUILDID.gpkg.tar  size  →  =cat/pf
+            pkgs=$(awk '{split($1,a,"/"); sub(/-[0-9]+\.gpkg\.tar$/,"",a[3]); print "=" a[1] "/" a[3]}' built.txt | sort -u)
+            sudo chroot "$R" emerge --getbinpkgonly --oneshot --verbose $pkgs 2>&1 | tee install.log
+          else
+            sudo chroot "$R" emerge --unmerge --quiet $PKGS
+            sudo chroot "$R" emerge --getbinpkgonly --oneshot --verbose $PKGS 2>&1 | tee install.log
+          fi
           grep -q 'binary' install.log
-          echo "✅ установка из binhost с проверкой подписи прошла: $PKGS" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ установка из binhost с проверкой подписи прошла" >> "$GITHUB_STEP_SUMMARY"
