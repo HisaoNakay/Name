@@ -1,0 +1,52 @@
+# Набор «как на Арче» (15.11.2026): программы из system-restore/pkglist-native.txt,
+# которых нет на Gentoo. Без групп kde-games/kde-edu целиком, NetworkManager, Firefox, Discover.
+# На HP: cp в /etc/portage/sets/arch-like → emerge -av --getbinpkg @arch-like
+
+# --- Plasma: настройки и интеграция ---
+kde-plasma/bluedevil
+kde-plasma/kdeplasma-addons
+kde-plasma/plasma-systemmonitor
+kde-plasma/ksystemstats
+kde-plasma/kinfocenter
+kde-plasma/kmenuedit
+kde-plasma/ksshaskpass
+kde-plasma/kwrited
+kde-plasma/plasma-disks
+kde-plasma/sddm-kcm
+kde-plasma/kgamma
+kde-plasma/ocean-sound-theme
+kde-plasma/oxygen-sounds
+kde-apps/kwalletmanager
+kde-apps/kdialog
+
+# --- Dolphin: превью, git, «открыть как админ» ---
+kde-apps/thumbnailers
+kde-apps/ffmpegthumbs
+kde-apps/dolphin-plugins-git
+app-admin/kio-admin
+kde-misc/markdownpart
+kde-apps/svgpart
+
+# --- Программы ---
+kde-apps/okular
+kde-apps/gwenview
+kde-apps/kcalc
+kde-apps/filelight
+kde-apps/kfind
+kde-apps/kcharselect
+kde-apps/kcolorchooser
+kde-apps/sweeper
+kde-apps/ksystemlog
+kde-apps/kolourpaint
+kde-apps/kompare
+kde-misc/kclock
+kde-misc/kweather
+net-p2p/ktorrent
+media-sound/krecorder
+sys-block/partitionmanager
+app-cdr/isoimagewriter
+x11-misc/ydotool
+
+# --- Игры ---
+kde-apps/kmahjongg
+kde-apps/kdiamond
